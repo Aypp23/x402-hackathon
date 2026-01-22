@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useCallback, useEffect, Rea
 import { useAccount, useBalance, useDisconnect, useSignMessage } from 'wagmi';
 import { useModal } from 'connectkit';
 import { formatUnits } from 'viem';
-import { arcTestnet } from '@/lib/wagmi';
+import { arcTestnet } from '@/lib/wagmiConfig';
 import { toast } from 'sonner';
 
 interface WalletContextType {

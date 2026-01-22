@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { WagmiProvider } from "wagmi";
 import { ConnectKitProvider } from "connectkit";
-import { wagmiConfig } from "@/lib/wagmi";
+import { wagmiConfig } from "@/lib/wagmiConfig";
 import { WalletProvider } from "@/contexts/WalletContext";
 import { ChatProvider } from "@/contexts/ChatContext";
 import Index from "./pages/Index";
