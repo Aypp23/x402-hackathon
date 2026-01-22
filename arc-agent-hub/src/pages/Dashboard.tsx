@@ -45,10 +45,11 @@ const Dashboard = () => {
   useEffect(() => {
     const fetchStats = async () => {
       try {
+        const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
         const agentId = selectedAgent?.id || localStorage.getItem('active_provider_id');
         const url = agentId
-          ? `http://localhost:3001/dashboard/stats?agentId=${agentId}`
-          : 'http://localhost:3001/dashboard/stats';
+          ? `${API_BASE_URL}/dashboard/stats?agentId=${agentId}`
+          : `${API_BASE_URL}/dashboard/stats`;
 
         const response = await fetch(url);
         const data = await response.json();

@@ -55,8 +55,9 @@ export default function Providers() {
   useEffect(() => {
     const fetchProviders = async () => {
       try {
+        const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
         // Fetch providers with per-agent stats
-        const providersRes = await fetch('http://localhost:3001/providers');
+        const providersRes = await fetch(`${API_BASE_URL}/providers`);
         const providersData = await providersRes.json();
 
         if (providersData.providers) {

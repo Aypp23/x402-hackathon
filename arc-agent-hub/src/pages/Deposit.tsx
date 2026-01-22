@@ -502,8 +502,9 @@ export default function Deposit() {
                       })()}
                       onClick={async () => {
                         try {
+                          const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
                           toast.info("Requesting funds from Circle Faucet...");
-                          const res = await fetch('http://localhost:3001/faucet', {
+                          const res = await fetch(`${API_BASE_URL}/faucet`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ address })

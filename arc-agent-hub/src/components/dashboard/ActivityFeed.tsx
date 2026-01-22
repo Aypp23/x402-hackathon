@@ -23,9 +23,11 @@ export function ActivityFeed({ agentId }: ActivityFeedProps) {
     const fetchActivities = async () => {
       if (!agentId) return;
 
+
       setLoading(true);
       try {
-        const response = await fetch(`http://localhost:3001/dashboard/activity?agentId=${agentId}&limit=10`);
+        const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+        const response = await fetch(`${API_BASE_URL}/dashboard/activity?agentId=${agentId}&limit=10`);
         const data = await response.json();
         if (data.activities) {
           setActivities(data.activities);
