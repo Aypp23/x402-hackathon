@@ -1,0 +1,42 @@
+{
+  "scout": {
+    "walletSetId": "5268ec2c-d44d-5f51-a9c8-487036766cf9",
+    "walletId": "25d0a836-590e-50b5-88f5-6a0f408b19c3",
+    "address": "0x02c3edb122cea7f08a2b98ae7dc619eaff8729fd"
+  },
+  "oracle": {
+    "walletSetId": "3bc81e86-4972-55fa-bf9c-c9b57364afcc",
+    "walletId": "64d195cd-993f-577c-b81a-9ff86ba1d83d",
+    "address": "0x14d1ac294a0d86d16362f98dedbded7cac5821f4"
+  },
+  "chat": {
+    "walletSetId": "6d25a8bb-cf56-5a31-9861-fa571bd62934",
+    "walletId": "794856c4-1503-5338-a950-a5dac5f0ad79",
+    "address": "0xe299f66858fb986cec93fc8020f1ee23116397ff"
+  },
+  "newsScout": {
+    "walletSetId": "3cdd24c7-c651-5e3e-a982-11029fdc48c1",
+    "walletId": "31fcdbca-45ec-51e7-b5e7-a2864dcbf5ed",
+    "address": "0x54064546d722bc099c8a6bf574f8f6f6356e809d"
+  },
+  "yieldOptimizer": {
+    "walletSetId": "8647b073-5b47-5ee6-8ab1-e5f40907a633",
+    "walletId": "e96e6405-162a-59a0-8b9b-36c9df79460c",
+    "address": "0x7657c1df20ef2fbda2704b78a82ad81bac399877"
+  },
+  "tokenomicsAnalyzer": {
+    "walletSetId": "7a86fd01-a036-50dc-9a20-9561e37c9797",
+    "walletId": "fd0632e4-dd41-5650-a558-9ff9ee2eef99",
+    "address": "0x59cbb763c511fdda4a531a6de7c3a54701836ff3"
+  },
+  "nftScout": {
+    "walletSetId": "8520b15a-3a38-5119-aa47-425b5af1a1db",
+    "walletId": "a85cfb7f-0364-58c9-97c0-1cb44eba84e7",
+    "address": "0xd8046c67f57a5ea86405a6a02417200b9648f3dc"
+  },
+  "perpStats": {
+    "walletSetId": "8dec9c6a-0199-571f-99b0-974d88934c12",
+    "walletId": "3a09a5fe-d6c9-5ea7-86ba-f236cf796bb7",
+    "address": "0x0C223BE662c882BE9C2fb910195D6707017A7AE8"
+  }
+}

@@ -1,0 +1,14 @@
+**Problem:**  
+In the rapidly evolving world of cryptocurrency, high-quality, real-time intelligence is fragmented and expensive. Traders and researchers are forced to toggle between dozens of tabs—price charts, news aggregators, on-chain explorers, and social sentiment tools—just to form a basic market thesis. Furthermore, accessing premium AI-driven insights typically requires expensive monthly subscriptions, creating a high barrier to entry for casual users.
+
+**Solution:**  
+**Arcana** is a decentralized, multi-agent AI orchestrator that acts as your personal crypto intelligence analyst. Unlike generic chatbots, Arcana doesn't just "guess"; it actively coordinates a fleet of specialized sub-agents to fetch live, verifiable data from the blockchain and the web. Whether you need the latest funding rates, a breakdown of token vesting schedules, or a summary of breaking news, Arcana synthesizes it all into a single, comprehensive answer.
+
+**Unique Features & Benefits:**  
+*   **Multi-Agent Orchestration**: A single query triggers parallel work from specialized agents (Price Oracle, News Scout, Chain Scout, Perp Stats, Tokenomics, and NFT Scout).
+*   **Powered by x402**: We leverage Circle's x402 protocol to enable gasless, instant micro-payments between agents. This allows the main orchestrator to pay sub-agents for their work in real-time without network congestion or fees.
+*   **Pay-As-You-Go**: No subscriptions. Users pay a flat, transparent fee of $0.03 USDC per query directly on the Arc Testnet.
+*   **Universal Access**: With integrated Circle CCTP (Cross-Chain Transfer Protocol), users can seamlessly deposit USDC from any supported network to start using Arcana immediately.
+
+**Target Audience:**  
+Arcana is built for crypto traders, DeFi researchers, and enthusiasts who demand institutional-grade insights without the complexity. It bridges the gap between raw data and actionable intelligence, making advanced market analysis accessible to everyone via a simple chat interface.
