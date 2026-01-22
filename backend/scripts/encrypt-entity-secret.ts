@@ -12,11 +12,17 @@ import * as path from 'path';
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
 const API_KEY = process.env.CIRCLE_API_KEY;
-const ENTITY_SECRET = 'a92aa5de0d331d4ad7cba0d737272727c30ad05ad1206b04df92d072e6147ac4';
+const ENTITY_SECRET = process.env.CIRCLE_ENTITY_SECRET;
 
 if (!API_KEY) {
     console.error('CIRCLE_API_KEY not found in .env file');
     console.error('Please add: CIRCLE_API_KEY=your_api_key');
+    process.exit(1);
+}
+
+if (!ENTITY_SECRET) {
+    console.error('CIRCLE_ENTITY_SECRET not found in .env file');
+    console.error('Please add: CIRCLE_ENTITY_SECRET=your_entity_secret_hex');
     process.exit(1);
 }
 
