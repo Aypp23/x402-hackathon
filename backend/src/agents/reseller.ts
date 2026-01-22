@@ -181,7 +181,8 @@ export class ResellerAgent {
         // The escrow is created, which is the important part for the crypto flow.
 
         const { generateResponse } = await import("../services/gemini.js");
-        const aiResponse = await generateResponse(query);
+        const geminiResult = await generateResponse(query);
+        const aiResponse = geminiResult.response;
 
         console.log(`[Reseller] Task completed (simulated return): ${aiResponse.substring(0, 30)}...`);
 

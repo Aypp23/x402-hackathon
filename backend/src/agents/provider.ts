@@ -127,9 +127,9 @@ export class ProviderAgent {
         console.log(`[Provider] Executing task ${escrowId}: "${query.substring(0, 50)}..."`);
 
         try {
-            const response = await generateResponse(query);
-            console.log(`[Provider] Task ${escrowId} completed. Response length: ${response.length}`);
-            return response;
+            const result = await generateResponse(query);
+            console.log(`[Provider] Task ${escrowId} completed. Response length: ${result.response.length}`);
+            return result.response;
         } catch (error) {
             console.error(`[Provider] Task ${escrowId} failed:`, error);
             throw error;

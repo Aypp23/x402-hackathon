@@ -71,7 +71,7 @@ export async function depositToGateway(amount: string) {
 export async function payForResource<T = unknown>(url: string, options?: RequestInit) {
     if (!client) throw new Error('[x402] Client not initialized');
 
-    const result = await client.pay<T>(url, options);
+    const result = await client.pay<T>(url, options as any);
     console.log(`[x402] ✅ Paid ${result.formattedAmount} USDC`);
 
     return result;
