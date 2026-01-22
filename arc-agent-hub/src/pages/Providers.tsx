@@ -185,30 +185,28 @@ export default function Providers() {
                     <span className="text-base font-medium text-foreground">${provider.price}</span>
                     <span className="text-sm text-muted-foreground/50">/query</span>
                   </div>
-                  {isAdmin && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation(); // Prevent card click if we add one later
-                        localStorage.setItem('active_provider_id', provider.id);
-                        localStorage.setItem('active_provider_name', provider.name);
-                        setConnectedProviderId(provider.id);
-                        navigate('/dashboard', {
-                          state: {
-                            providerId: provider.id,
-                            providerName: provider.name
-                          }
-                        });
-                      }}
-                      className={cn(
-                        "px-4 py-2 rounded-full text-sm font-medium transition-all duration-300",
-                        connectedProviderId === provider.id
-                          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
-                          : "liquid-glass-primary text-primary-foreground hover:opacity-90"
-                      )}
-                    >
-                      {connectedProviderId === provider.id ? 'Connected' : 'Connect'}
-                    </button>
-                  )}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation(); // Prevent card click if we add one later
+                      localStorage.setItem('active_provider_id', provider.id);
+                      localStorage.setItem('active_provider_name', provider.name);
+                      setConnectedProviderId(provider.id);
+                      navigate('/dashboard', {
+                        state: {
+                          providerId: provider.id,
+                          providerName: provider.name
+                        }
+                      });
+                    }}
+                    className={cn(
+                      "px-4 py-2 rounded-full text-sm font-medium transition-all duration-300",
+                      connectedProviderId === provider.id
+                        ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
+                        : "liquid-glass-primary text-primary-foreground hover:opacity-90"
+                    )}
+                  >
+                    {connectedProviderId === provider.id ? 'Connected' : 'Connect'}
+                  </button>
                 </div>
               </div>
             ))}

@@ -8,7 +8,7 @@ import { useWallet } from '@/contexts/WalletContext';
 const ADMIN_ADDRESS = import.meta.env.VITE_ADMIN_ADDRESS || '';
 
 const allBottomNavItems = [
-  { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard', adminOnly: true },
+  { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard', adminOnly: false },
   { icon: Wallet, label: 'Deposit', path: '/deposit', adminOnly: false },
   { icon: Store, label: 'Providers', path: '/providers', adminOnly: false },
 ];
