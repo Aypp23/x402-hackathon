@@ -85,27 +85,7 @@ const Dashboard = () => {
     return () => clearInterval(interval);
   }, [address, selectedAgent?.id]);
 
-  // Admin wallet address from env
-  const ADMIN_ADDRESS = import.meta.env.VITE_ADMIN_ADDRESS || '';
-  const isAdmin = address?.toLowerCase() === ADMIN_ADDRESS.toLowerCase();
 
-  // Redirect non-admin users to home page
-  if (!address || !isAdmin) {
-    return (
-      <Layout>
-        <div className="flex-1 p-6 lg:p-8 overflow-y-auto">
-          <div className="flex flex-col items-center justify-center h-[60vh] space-y-4">
-            <div className="text-center space-y-2">
-              <h2 className="text-xl font-medium text-foreground">Access Denied</h2>
-              <p className="text-sm text-muted-foreground">
-                Only the admin wallet can access the agent dashboard.
-              </p>
-            </div>
-          </div>
-        </div>
-      </Layout>
-    );
-  }
 
   return (
     <Layout>
