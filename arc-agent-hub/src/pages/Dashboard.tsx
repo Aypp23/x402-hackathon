@@ -20,7 +20,7 @@ const Dashboard = () => {
 
   const [isOwner, setIsOwner] = useState(false);
   const [isAgentActive, setIsAgentActive] = useState(true);
-  const [selectedAgent, setSelectedAgent] = useState<{ id: string; name: string } | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<{ id: string; name: string; wallet?: string } | null>(null);
   const [stats, setStats] = useState({
     treasury: "0.00",
     tasksCompleted: 0,
@@ -62,9 +62,11 @@ const Dashboard = () => {
           avgResponseTime: data.avgResponseTime || "0s"
         });
 
-        // Update agent name from backend if not already set
-        if (data.agentName && (!selectedAgent?.name || selectedAgent.name === '')) {
-          setSelectedAgent(prev => prev ? { ...prev, name: data.agentName } : { id: agentId || '', name: data.agentName });
+        // Update agent name and wallet from backend if not already set
+        if (data.agentName || data.wallet) {
+          setSelectedAgent(prev => prev
+            ? { ...prev, name: data.agentName || prev.name, wallet: data.wallet || prev.wallet }
+            : { id: agentId || '', name: data.agentName, wallet: data.wallet });
         }
 
         if (data.isFrozen !== undefined) setIsAgentActive(!data.isFrozen);
@@ -95,7 +97,18 @@ const Dashboard = () => {
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3">
             <div>
               <h1 className="text-2xl font-medium text-foreground tracking-tight">
-                {selectedAgent?.name || 'Dashboard'}
+                {selectedAgent?.wallet ? (
+                  <a
+                    href={`https://testnet.arcscan.app/address/${selectedAgent.wallet}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-primary transition-colors hover:underline"
+                  >
+                    {selectedAgent.name}
+                  </a>
+                ) : (
+                  selectedAgent?.name || 'Dashboard'
+                )}
               </h1>
               <p className="text-sm text-muted-foreground mt-0.5">
                 {selectedAgent?.name
