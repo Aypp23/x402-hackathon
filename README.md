@@ -63,14 +63,14 @@ x402/
 
 ```mermaid
 flowchart LR
-  U[User Wallet] --> F[Frontend]
-  F -->|USDC transfer on Base Sepolia| USDC[(USDC Contract)]
-  F -->|POST /query + txHash| B[Backend Orchestrator]
-  B -->|verify tx receipt| RPC[(Base Sepolia RPC)]
-  B -->|planning/tool calls| G[Gemini]
-  B -->|x402 pay/retry| X[x402 Seller Endpoints]
-  X --> DATA[External Data APIs]
-  B --> DB[(Supabase)]
+  U["User Wallet"] --> F["Frontend"]
+  F -->|"USDC transfer on Base Sepolia"| USDC["USDC Contract"]
+  F -->|"POST /query + txHash"| B["Backend Orchestrator"]
+  B -->|"Verify tx receipt"| RPC["Base Sepolia RPC"]
+  B -->|"Plan and call tools"| G["Gemini"]
+  B -->|"x402 pay -> retry"| X["x402 Seller Endpoints"]
+  X --> DATA["External Data APIs"]
+  B --> DB["Supabase"]
   B --> F
 ```
 
