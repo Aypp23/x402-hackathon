@@ -54,6 +54,7 @@ const Dashboard = () => {
       amountUsd: number;
       payTo: string;
       txHash: string | null;
+      settleTxHash?: string | null;
       receiptRef: string | null;
       settledAt: string;
       success: boolean;
@@ -270,7 +271,7 @@ const Dashboard = () => {
                   <p className="text-sm text-muted-foreground">No paid calls in this session yet.</p>
                 ) : (
                   spend.receipts.slice(0, 8).map((r, idx) => (
-                    <div key={`${r.receiptRef || r.txHash || idx}`} className="text-xs rounded-lg p-2">
+                    <div key={`${r.txHash || r.settleTxHash || r.receiptRef || idx}`} className="text-xs rounded-lg p-2">
                       <div className="flex items-center justify-between">
                         <span className="text-foreground font-medium">{r.agentId}</span>
                         <span className={cn("font-medium", r.success ? "text-emerald-400" : "text-red-400")}>
@@ -279,7 +280,7 @@ const Dashboard = () => {
                       </div>
                       <div className="text-muted-foreground truncate">{r.endpoint}</div>
                       <div className="text-muted-foreground truncate">
-                        {r.txHash || r.receiptRef || "Receipt pending"}
+                        {r.txHash || r.settleTxHash || "On-chain tx pending"}
                       </div>
                     </div>
                   ))
