@@ -67,6 +67,10 @@ const ERC20_BALANCE_ABI = parseAbi([
     "function decimals() view returns (uint8)",
 ]);
 
+// Required for hosted environments (Render, Railway, etc.) so
+// express-rate-limit can safely use X-Forwarded-For from the edge proxy.
+app.set('trust proxy', 1);
+
 function inferAgentIdFromEndpoint(endpoint?: string): string | null {
     if (!endpoint) return null;
     const match = endpoint.match(/\/api\/x402\/([^/?#]+)/i);
