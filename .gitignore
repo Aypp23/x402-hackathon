@@ -29,6 +29,7 @@ yarn-error.log*
 .idea/
 
 # Foundry
-/lib/
+/lib/*
 !lib/forge-std
 !lib/openzeppelin-contracts
+!lib/README.md
