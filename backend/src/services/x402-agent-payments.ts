@@ -493,6 +493,10 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
     let facilitatorSettlementId: string | undefined;
     let facilitatorPaymentId: string | undefined;
 
+    console.log(
+        `[x402 Flow] Request start method=${method} agent=${req.agentId} endpoint=${req.endpoint} trace=${req.traceId || 'none'}`,
+    );
+
     try {
         const response = await fetchWithPayment!(endpoint, {
             method,
@@ -547,6 +551,19 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
             responsePaymentPayload,
         );
 
+        if (responseHeaderRaw || settleReceipt) {
+            console.log(
+                `[x402 Flow] 402 challenged -> paid -> retried -> ${response.ok ? 'succeeded' : `failed (${response.status})`} `
+                + `agent=${req.agentId} endpoint=${req.endpoint} tx=${txHash || 'n/a'} receiptRef=${receiptRef || 'n/a'} `
+                + `trace=${req.traceId || 'none'}`,
+            );
+        } else {
+            console.warn(
+                `[x402 Flow] No payment receipt headers found on response status=${response.status} `
+                + `agent=${req.agentId} endpoint=${req.endpoint} trace=${req.traceId || 'none'}`,
+            );
+        }
+
         if (!response.ok) {
             throw new Error(`Paid request failed (${response.status}): ${typeof raw === 'string' ? raw : JSON.stringify(raw)}`);
         }
@@ -585,6 +602,11 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
         addRecordToSession(payment);
 
         await logX402PaymentRecord(payment);
+
+        console.log(
+            `[x402 Flow] Spend logged agent=${req.agentId} amountUsd=${priceUsd.toFixed(2)} endpoint=${req.endpoint} `
+            + `tx=${txHash || 'n/a'} trace=${req.traceId || 'none'} latencyMs=${latencyMs}`,
+        );
 
         return {
             data: parseData<T>(raw),
@@ -627,6 +649,11 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
         addRecordToSession(payment);
 
         await logX402PaymentRecord(payment);
+
+        console.error(
+            `[x402 Flow] Spend log (failed call) agent=${req.agentId} amountUsd=${priceUsd.toFixed(2)} endpoint=${req.endpoint} `
+            + `tx=${txHash || 'n/a'} trace=${req.traceId || 'none'} latencyMs=${payment.latencyMs} error=${(error as Error).message}`,
+        );
 
         throw error;
     }
