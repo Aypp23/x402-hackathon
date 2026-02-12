@@ -2,8 +2,8 @@ import { useState, useCallback } from 'react';
 import { useWallet } from '@/contexts/WalletContext';
 import { useChatContext, Message } from '@/contexts/ChatContext';
 import { toast } from 'sonner';
-import { encodeFunctionData, keccak256, toHex, parseEther } from 'viem';
-import { ESCROW_CONTRACT, ESCROW_ABI, PROVIDER_AGENT_ADDRESS, PROVIDER_AGENT_ID } from '@/contracts/escrow';
+import { encodeFunctionData, parseUnits } from 'viem';
+import { PAYMENT_TOKEN, PROVIDER_AGENT_ADDRESS } from '@/contracts/escrow';
 
 export interface ImageData {
   base64: string;
@@ -17,17 +17,11 @@ export function useChat() {
   const { messages, setMessages, clearChat, currentSessionId, createNewSession, saveMessageToDb } = useChatContext();
   const [isTyping, setIsTyping] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
-  const { isConnected, address, balance, refreshBalance } = useWallet();
+  const { isConnected, address, refreshBalance } = useWallet();
 
   const sendMessage = useCallback(async (content: string, imageData?: ImageData) => {
     if (!isConnected || !address) {
       toast.error('Please connect your wallet first');
-      return;
-    }
-
-    // Check balance first
-    if (balance < COST_PER_MESSAGE) {
-      toast.error('Insufficient balance. Please deposit more USDC.');
       return;
     }
 
@@ -36,6 +30,22 @@ export function useChat() {
     if (!ethereum) {
       toast.error('MetaMask is required for transactions');
       return;
+    }
+
+    // Avoid charging user if backend cannot be reached.
+    const healthController = new AbortController();
+    const healthTimeout = window.setTimeout(() => healthController.abort(), 5000);
+    try {
+      const healthRes = await fetch(`${API_BASE_URL}/health`, { signal: healthController.signal });
+      if (!healthRes.ok) {
+        toast.error(`Backend unavailable at ${API_BASE_URL} (HTTP ${healthRes.status}).`);
+        return;
+      }
+    } catch {
+      toast.error(`Cannot reach backend at ${API_BASE_URL}. Check VITE_API_URL and backend server.`);
+      return;
+    } finally {
+      window.clearTimeout(healthTimeout);
     }
 
     // Add user message immediately (with image preview if attached)
@@ -49,34 +59,28 @@ export function useChat() {
     setMessages(prev => [...prev, userMessage]);
 
     // Create session if none exists (don't clear messages since we already added user message)
-    if (!currentSessionId) {
-      await createNewSession({ clearMessages: false });
+    let activeSessionId = currentSessionId;
+    if (!activeSessionId) {
+      activeSessionId = await createNewSession({ clearMessages: false });
+      if (!activeSessionId) {
+        toast.warning('Chat history is unavailable. Continuing without saving this conversation.');
+      }
     }
 
-    // Step 1: Create Escrow Transaction
+    // Step 1: Send USDC payment transaction
     setIsPaying(true);
-    toast.info('Please sign the transaction to pay for this query ($0.02)');
+    toast.info(`Please sign the transaction to pay ${COST_PER_MESSAGE.toFixed(2)} ${PAYMENT_TOKEN.symbol}`);
 
     let txHash: string;
 
     try {
-      // Create task hash from the query
-      const taskHash = keccak256(toHex(content));
+      const chainIdHex = `0x${PAYMENT_TOKEN.chainId.toString(16)}`;
 
-      // Encode the function call
-      const data = encodeFunctionData({
-        abi: ESCROW_ABI,
-        functionName: 'createEscrow',
-        args: [PROVIDER_AGENT_ADDRESS, taskHash, PROVIDER_AGENT_ID],
-      });
-
-      // Send transaction via MetaMask (Direct Transfer)
-      // First ensure we're on Arc Testnet
-      const ARC_CHAIN_ID = '0x4cef52'; // 5042002 in hex
+      // Ensure user is on Base Sepolia for query payments.
       try {
         await ethereum.request({
           method: 'wallet_switchEthereumChain',
-          params: [{ chainId: ARC_CHAIN_ID }],
+          params: [{ chainId: chainIdHex }],
         });
       } catch (switchError: any) {
         // Chain not added, add it
@@ -84,28 +88,44 @@ export function useChat() {
           await ethereum.request({
             method: 'wallet_addEthereumChain',
             params: [{
-              chainId: ARC_CHAIN_ID,
-              chainName: 'Arc Testnet',
-              nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
-              rpcUrls: ['https://rpc.testnet.arc.network'],
-              blockExplorerUrls: ['https://explorer.testnet.arc.network'],
+              chainId: chainIdHex,
+              chainName: 'Base Sepolia',
+              nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+              rpcUrls: [PAYMENT_TOKEN.rpcUrl],
+              blockExplorerUrls: [PAYMENT_TOKEN.explorerUrl],
             }],
           });
         }
       }
 
-      // Send 0.02 USDC directly to the Agent
+      const transferData = encodeFunctionData({
+        abi: [
+          {
+            type: 'function',
+            name: 'transfer',
+            stateMutability: 'nonpayable',
+            inputs: [
+              { name: 'to', type: 'address' },
+              { name: 'amount', type: 'uint256' },
+            ],
+            outputs: [{ name: '', type: 'bool' }],
+          },
+        ],
+        functionName: 'transfer',
+        args: [PROVIDER_AGENT_ADDRESS, parseUnits(COST_PER_MESSAGE.toString(), PAYMENT_TOKEN.decimals)],
+      });
+
       txHash = await ethereum.request({
         method: 'eth_sendTransaction',
         params: [{
           from: address,
-          to: PROVIDER_AGENT_ADDRESS, // Send directly to Agent
-          value: toHex(parseEther(COST_PER_MESSAGE.toString())),
-          data: '0x', // No data needed for native transfer
+          to: PAYMENT_TOKEN.address,
+          value: '0x0',
+          data: transferData,
         }],
       });
 
-      toast.success('Payment confirmed! Processing your query...');
+      toast.success(`${PAYMENT_TOKEN.symbol} payment confirmed. Processing your query...`);
     } catch (error: any) {
       console.error('Payment error:', error);
       setIsPaying(false);
@@ -153,6 +173,14 @@ export function useChat() {
           userAddress: address,
           imageData: imageData ? { base64: imageData.base64, mimeType: imageData.mimeType } : undefined,
           conversationHistory, // Pass previous messages for context
+          sessionId: activeSessionId,
+          budgetUsd: (() => {
+            const params = new URLSearchParams(window.location.search);
+            const raw = params.get('budgetUsd') || params.get('budget');
+            if (!raw) return undefined;
+            const value = Number(raw);
+            return Number.isFinite(value) ? value : undefined;
+          })(),
         }),
       });
 
@@ -176,8 +204,10 @@ export function useChat() {
       setMessages(prev => [...prev, aiMessage]);
 
       // Save both messages to database
-      await saveMessageToDb(userMessage);
-      await saveMessageToDb(aiMessage);
+      if (activeSessionId) {
+        await saveMessageToDb(userMessage, activeSessionId);
+        await saveMessageToDb(aiMessage, activeSessionId);
+      }
 
       toast.success(`Query completed • Paid $${COST_PER_MESSAGE}`);
 
@@ -187,12 +217,16 @@ export function useChat() {
       }
     } catch (error) {
       console.error('Chat error:', error);
-      toast.error(`Error: ${(error as Error).message}`);
+      const rawMessage = (error as Error).message || 'Unknown error';
+      const message = /Failed to fetch|NetworkError|Load failed/i.test(rawMessage)
+        ? `Cannot reach backend at ${API_BASE_URL}. Check VITE_API_URL and backend server.`
+        : rawMessage;
+      toast.error(`Error: ${message}`);
 
       // Add error message (but they already paid)
       const errorMessage: Message = {
         id: `error-${Date.now()}`,
-        content: `Sorry, I encountered an error after your payment: ${(error as Error).message}. Your payment of $${COST_PER_MESSAGE} was recorded (tx: ${txHash?.slice(0, 10)}...)`,
+        content: `Sorry, I encountered an error after your payment: ${message}. Your payment of $${COST_PER_MESSAGE} was recorded (tx: ${txHash?.slice(0, 10)}...)`,
         isUser: false,
         timestamp: new Date(),
         txHash,
@@ -201,7 +235,7 @@ export function useChat() {
     } finally {
       setIsTyping(false);
     }
-  }, [isConnected, address, balance, refreshBalance, messages, setMessages, currentSessionId, createNewSession, saveMessageToDb]);
+  }, [isConnected, address, refreshBalance, messages, setMessages, currentSessionId, createNewSession, saveMessageToDb]);
 
   return { messages, isTyping, isPaying, sendMessage, clearChat };
 }

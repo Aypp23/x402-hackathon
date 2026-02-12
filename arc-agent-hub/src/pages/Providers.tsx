@@ -20,8 +20,11 @@ interface Provider {
   reviews: number;
   price: number;
   responseTime: string;
+  pricingModel: string;
+  paidTools: boolean;
   verified: boolean;
   popular: boolean;
+  isFrozen: boolean;
 }
 
 // Rich metadata to merge with backend data
@@ -47,20 +50,40 @@ export default function Providers() {
   const [connectedProviderId, setConnectedProviderId] = useState<string | null>(null);
   const [expandedProviderId, setExpandedProviderId] = useState<string | null>(null);
 
+  const connectProvider = (provider: Provider) => {
+    localStorage.setItem('active_provider_id', provider.id);
+    localStorage.setItem('active_provider_name', provider.name);
+    localStorage.setItem('active_provider_is_frozen', String(provider.isFrozen));
+    setConnectedProviderId(provider.id);
+    navigate('/dashboard', {
+      state: {
+        providerId: provider.id,
+        providerName: provider.name,
+        providerIsFrozen: provider.isFrozen,
+      }
+    });
+  };
+
   useEffect(() => {
     const stored = localStorage.getItem('active_provider_id');
     if (stored) setConnectedProviderId(stored);
   }, []);
 
   useEffect(() => {
-    const fetchProviders = async () => {
+    const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+    let isMounted = true;
+
+    const fetchProviders = async (silent = false) => {
       try {
-        const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+        if (!silent && isMounted) {
+          setLoading(true);
+        }
+
         // Fetch providers with per-agent stats
         const providersRes = await fetch(`${API_BASE_URL}/providers`);
         const providersData = await providersRes.json();
 
-        if (providersData.providers) {
+        if (providersData.providers && isMounted) {
           const mappedProviders = providersData.providers.map((p: any, index: number) => ({
             id: p.agentId,
             name: p.name,
@@ -72,29 +95,46 @@ export default function Providers() {
             reviews: p.totalRatings || 0,
             price: parseFloat(p.price),
             responseTime: p.avgResponseTime || '—',
+            pricingModel: p.pricingModel || 'per-call-fixed',
+            paidTools: Boolean(p.paidTools),
             verified: true,
-            popular: index === 0
+            popular: index === 0,
+            isFrozen: Boolean(p.isFrozen),
           }));
           setProviders(mappedProviders);
         }
       } catch (error) {
         console.error('Failed to fetch providers:', error);
-        toast.error("Failed to load providers");
+        if (!silent) {
+          toast.error("Failed to load providers");
+        }
       } finally {
-        setLoading(false);
+        if (!silent && isMounted) {
+          setLoading(false);
+        }
       }
     };
 
 
-    fetchProviders();
+    void fetchProviders();
+    const refreshInterval = window.setInterval(() => {
+      void fetchProviders(true);
+    }, 10000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(refreshInterval);
+    };
   }, []);
 
-  const filteredProviders = providers.filter((provider) => {
-    const matchesSearch = provider.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      provider.description.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCategory = selectedCategory === 'All' || provider.category === selectedCategory;
-    return matchesSearch && matchesCategory;
-  });
+  const filteredProviders = providers
+    .filter((provider) => {
+      const matchesSearch = provider.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        provider.description.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesCategory = selectedCategory === 'All' || provider.category === selectedCategory;
+      return matchesSearch && matchesCategory;
+    })
+    .sort((a, b) => Number(a.isFrozen) - Number(b.isFrozen));
 
   return (
     <Layout>
@@ -144,13 +184,39 @@ export default function Providers() {
             {filteredProviders.map((provider) => (
               <div
                 key={provider.id}
-                onClick={() => setExpandedProviderId(expandedProviderId === provider.id ? null : provider.id)}
-                className="liquid-glass-card liquid-glass-shimmer p-5 cursor-pointer transition-all duration-200"
+                onClick={() => {
+                  if (provider.isFrozen) {
+                    connectProvider(provider);
+                    return;
+                  }
+                  setExpandedProviderId(expandedProviderId === provider.id ? null : provider.id);
+                }}
+                className={cn(
+                  "liquid-glass-card liquid-glass-shimmer p-5 cursor-pointer transition-all duration-200 relative overflow-hidden",
+                  provider.isFrozen && "border-red-900/40 bg-red-950/5"
+                )}
               >
+                {provider.isFrozen && (
+                  <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                    <span className="-rotate-12 text-4xl font-bold tracking-[0.35em] text-red-400/85 drop-shadow-[0_0_14px_rgba(248,113,113,0.55)] select-none">
+                      FROZEN
+                    </span>
+                  </div>
+                )}
                 <div className="flex items-center gap-2 mb-3">
                   {provider.popular && (
                     <span className="text-xs font-medium px-2 py-1 rounded-md bg-primary/10 text-primary/70">
                       Popular
+                    </span>
+                  )}
+                  {provider.isFrozen && (
+                    <span className="text-xs font-medium px-2 py-1 rounded-md bg-red-500/15 text-red-300">
+                      Frozen
+                    </span>
+                  )}
+                  {provider.paidTools && (
+                    <span className="text-xs font-medium px-2 py-1 rounded-md bg-emerald-500/15 text-emerald-300">
+                      Paid tools
                     </span>
                   )}
                   <span className="text-xs font-medium px-2 py-1 rounded-md bg-secondary text-muted-foreground ml-auto">
@@ -181,31 +247,33 @@ export default function Providers() {
                 </div>
 
                 <div className="flex items-center justify-between pt-4 border-t border-border/30">
-                  <div className="flex items-center gap-1">
-                    <span className="text-base font-medium text-foreground">${provider.price}</span>
-                    <span className="text-sm text-muted-foreground/50">/query</span>
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-1">
+                      <span className="text-base font-medium text-foreground">${provider.price}</span>
+                      <span className="text-sm text-muted-foreground/50">/query</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground/60">
+                      Pricing model: {provider.pricingModel === 'per-call-fixed' ? 'Per-call fixed' : provider.pricingModel}
+                    </p>
                   </div>
                   <button
                     onClick={(e) => {
-                      e.stopPropagation(); // Prevent card click if we add one later
-                      localStorage.setItem('active_provider_id', provider.id);
-                      localStorage.setItem('active_provider_name', provider.name);
-                      setConnectedProviderId(provider.id);
-                      navigate('/dashboard', {
-                        state: {
-                          providerId: provider.id,
-                          providerName: provider.name
-                        }
-                      });
+                      e.stopPropagation();
+                      connectProvider(provider);
                     }}
                     className={cn(
                       "px-4 py-2 rounded-full text-sm font-medium transition-all duration-300",
+                      provider.isFrozen
+                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30"
+                        : "",
+                      !provider.isFrozen && (
                       connectedProviderId === provider.id
                         ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
                         : "liquid-glass-primary text-primary-foreground hover:opacity-90"
+                      )
                     )}
                   >
-                    {connectedProviderId === provider.id ? 'Connected' : 'Connect'}
+                    {provider.isFrozen ? 'Manage' : (connectedProviderId === provider.id ? 'Connected' : 'Connect')}
                   </button>
                 </div>
               </div>

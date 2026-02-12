@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useCallback, useEffect, Rea
 import { useAccount, useBalance, useDisconnect, useSignMessage } from 'wagmi';
 import { useModal } from 'connectkit';
 import { formatUnits } from 'viem';
-import { arcTestnet } from '@/lib/wagmiConfig';
+import { appChain } from '@/lib/wagmiConfig';
 import { toast } from 'sonner';
 
 interface WalletContextType {
@@ -28,10 +28,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [pendingVerification, setPendingVerification] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
 
-  // Fetch balance from Arc Testnet
+  // Fetch balance from the configured app chain
   const { data: balanceData, refetch: refetchBalance } = useBalance({
     address: wagmiAddress,
-    chainId: arcTestnet.id,
+    chainId: appChain.id,
   });
 
   const [localBalance, setLocalBalance] = useState(0);

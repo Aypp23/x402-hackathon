@@ -1,31 +1,35 @@
-// Config for Arc Testnet Agent Marketplace
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({
+    path: path.resolve(__dirname, "../.env"),
+    override: process.env.NODE_ENV !== "production",
+});
+
+// Shared app configuration
 export const config = {
-    // Arc Testnet
+    // Base Sepolia defaults
     chain: {
-        id: 5042002,
-        name: "Arc Testnet",
-        rpcUrl: "https://rpc.testnet.arc.network",
-        explorerUrl: "https://explorer.testnet.arc.network",
+        id: Number(process.env.CHAIN_ID || 84532),
+        name: process.env.CHAIN_NAME || "Base Sepolia",
+        rpcUrl: process.env.CHAIN_RPC_URL || "https://sepolia.base.org",
+        explorerUrl: process.env.CHAIN_EXPLORER_URL || "https://sepolia.basescan.org",
     },
 
-    // Deployed Contracts (v3 - ERC20 Escrow)
+    // Deployed contracts (override per environment)
     contracts: {
-        policyVault: "0x7062d477c70B1879D826215265b928e51e548e5d" as `0x${string}`,
-        escrow: "0x14B5D6E8fE67cAE89f5a78737F86274178cdc6f8" as `0x${string}`,
-        agentRegistry: "0xec48D77c949244ef5871555aDA2b657Fa5006c49" as `0x${string}`,
+        policyVault: (process.env.POLICY_VAULT_ADDRESS || "0x7062d477c70B1879D826215265b928e51e548e5d") as `0x${string}`,
+        escrow: (process.env.ESCROW_ADDRESS || "0x14B5D6E8fE67cAE89f5a78737F86274178cdc6f8") as `0x${string}`,
+        agentRegistry: (process.env.AGENT_REGISTRY_ADDRESS || "0xec48D77c949244ef5871555aDA2b657Fa5006c49") as `0x${string}`,
     },
 
-    // Arc Native Tokens
+    // Token defaults
     tokens: {
-        usdc: "0x3600000000000000000000000000000000000000" as `0x${string}`, // Native USDC
-        eurc: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a" as `0x${string}`,
-        usyc: "0xe9185F0c5F296Ed1797AaE4238D26CCaBEadb86C" as `0x${string}`,
-    },
-
-    // Gateway Contracts
-    gateway: {
-        wallet: "0x0077777d7EBA4688BDeF3E311b846F25870A19B9" as `0x${string}`,
-        minter: "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B" as `0x${string}`,
+        usdc: (process.env.USDC_ADDRESS || "0x036CbD53842c5426634e7929541eC2318f3dCF7e") as `0x${string}`,
+        eurc: (process.env.EURC_ADDRESS || "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a") as `0x${string}`,
+        usyc: (process.env.USYC_ADDRESS || "0xe9185F0c5F296Ed1797AaE4238D26CCaBEadb86C") as `0x${string}`,
     },
 
     // Agent Settings

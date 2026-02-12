@@ -5,26 +5,21 @@ import { config } from "./config.js";
 import { ResellerAgent } from "./agents/reseller.js";
 import { ProviderAgent } from "./agents/provider.js";
 import { publicClient, contracts } from "./blockchain.js";
-import { formatEther, parseEther } from "viem";
+import { formatEther, formatUnits, parseAbi } from "viem";
 import { generateResponse, initGemini } from "./services/gemini.js";
-import { initCircleClient, requestTestnetTokens } from "./services/circle-mcp.js";
-import { checkGatewayStatus } from "./services/gateway.js";
 import { fetchPrice, fetchPrices } from "./services/price-oracle.js";
-import { initOracleWallet, getOracleBalance, withdrawOracleFunds, getOracleAddress, getOracleAgentInfo, registerOracleAgent } from "./agents/oracle-wallet.js";
-import { initChatWallet, getChatBalance, getChatAddress } from "./agents/chat-wallet.js";
-import { initScoutWallet, getScoutAddress, getScoutAgentInfo } from "./agents/scout-wallet.js";
-import { initNewsScoutWallet, getNewsScoutAddress } from "./agents/news-scout-wallet.js";
-import { initYieldWallet, getYieldAddress } from "./agents/yield-wallet.js";
-import { initTokenomicsWallet, getTokenomicsAddress } from "./agents/tokenomics-wallet.js";
-import { initNftScoutWallet, getNftScoutAddress } from "./agents/nft-scout-wallet.js";
-import { createOraclePayment, releaseOraclePayment, getAgentWalletStatus } from "./services/agent-payments.js";
-import { initX402Payments, getX402Balance } from "./services/x402-agent-payments.js";
-import { initAutoRefillClient, startAutoRefillService } from "./services/x402-auto-refill.js";
-import { startAutoWithdraw } from "./services/x402-agent-auto-withdraw.js";
-import { initGatewayClient } from "./services/x402-gateway-client.js";
-import x402AgentRoutes from "./routes/x402-agent-routes.js";
+import {
+    initX402Payments,
+    getSessionSpendSummary,
+    getRecentReceipts,
+    getSellerAddressMap,
+    getX402BuyerSource
+} from "./services/x402-agent-payments.js";
+import { buildX402AgentRoutes } from "./routes/x402-agent-routes.js";
 import {
     initSupabase,
+    getSupabase,
+    getLastSupabaseError,
     createChatSession,
     getChatSessions,
     deleteChatSession,
@@ -40,16 +35,72 @@ import {
     getTotalUsageCount,
     getAllAgentStats,
     getAgentStatsById,
-    getRecentQueries
+    getRecentQueries,
+    getRecentX402Payments,
+    saveX402Trace,
+    getSessionSpendFromDb
 } from "./services/supabase.js";
+import {
+    ensureAgentPoliciesReady,
+    getAgentPolicy,
+    getAllAgentPolicies,
+    isAgentFrozen,
+    setAgentFrozen,
+    updateAgentPolicy,
+} from "./services/agent-policy.js";
+import { type X402AgentId, X402_AGENT_IDS } from "./services/x402-common.js";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, "../../.env") });
+dotenv.config({
+    path: path.resolve(__dirname, "../.env"),
+    override: process.env.NODE_ENV !== "production",
+});
 
 const app = express();
+const x402TraceBySession = new Map<string, any>();
+const x402TraceById = new Map<string, any>();
+const ERC20_BALANCE_ABI = parseAbi([
+    "function balanceOf(address account) view returns (uint256)",
+    "function decimals() view returns (uint8)",
+]);
+
+function inferAgentIdFromEndpoint(endpoint?: string): string | null {
+    if (!endpoint) return null;
+    const match = endpoint.match(/\/api\/x402\/([^/?#]+)/i);
+    return match?.[1]?.toLowerCase() || null;
+}
+
+function inferAgentIdFromTraceStep(step: { endpoint?: string; toolName?: string }): string | null {
+    const fromEndpoint = inferAgentIdFromEndpoint(step.endpoint);
+    if (fromEndpoint) return fromEndpoint;
+
+    const tool = (step.toolName || "").toLowerCase();
+    if (!tool) return null;
+    if (tool.includes("oracle") || tool.includes("price")) return "oracle";
+    if (tool.includes("yield")) return "yield";
+    if (tool.includes("tokenomics")) return "tokenomics";
+    if (tool.includes("nft")) return "nft";
+    if (tool.includes("perp")) return "perp";
+    if (tool.includes("news")) return "news";
+    if (tool.includes("scout")) return "scout";
+    return null;
+}
+
+function parseAgentId(input?: string): X402AgentId | null {
+    if (!input) return null;
+    const normalized = input.toLowerCase();
+    return X402_AGENT_IDS.includes(normalized as X402AgentId) ? (normalized as X402AgentId) : null;
+}
+
+function isAdminRequestAuthorized(req: express.Request): boolean {
+    const requiredKey = process.env.ADMIN_API_KEY;
+    if (!requiredKey) return true;
+    const provided = req.header('x-admin-key');
+    return provided === requiredKey;
+}
 
 // CORS configuration - add production domain when available
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:8080'];
@@ -74,6 +125,24 @@ const generalLimiter = rateLimit({
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => {
+        const path = req.path || '';
+
+        // Browser preflight and read-heavy dashboard polling should not consume global quota.
+        if (req.method === 'OPTIONS') return true;
+        if (req.method === 'GET' && (
+            path === '/health' ||
+            path === '/providers' ||
+            path.startsWith('/dashboard/')
+        )) {
+            return true;
+        }
+
+        // Admin policy routes use a dedicated limiter below.
+        if (path.startsWith('/admin/policy')) return true;
+
+        return false;
+    },
 });
 
 const queryLimiter = rateLimit({
@@ -84,10 +153,10 @@ const queryLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-const faucetLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 3, // 3 faucet requests per hour
-    message: { error: 'Faucet rate limit exceeded. Try again in an hour.' },
+const adminPolicyLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 30, // 30 admin policy requests per minute per IP
+    message: { error: 'Too many admin policy requests, please slow down.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
@@ -95,12 +164,11 @@ const faucetLimiter = rateLimit({
 app.use(generalLimiter);
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use('/admin/policy', adminPolicyLimiter);
 
 // Environment validation
 const PRIVATE_KEY = process.env.PRIVATE_KEY as `0x${string}` | undefined;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
-const CIRCLE_ENTITY_SECRET = process.env.CIRCLE_ENTITY_SECRET;
 
 if (!PRIVATE_KEY) {
     console.error("❌ PRIVATE_KEY is missing in .env. Startup failed.");
@@ -114,101 +182,41 @@ if (GEMINI_API_KEY) {
     providerAgent.initializeGemini(GEMINI_API_KEY);
 }
 
-// Initialize Circle MCP if keys are present
-if (CIRCLE_API_KEY && CIRCLE_ENTITY_SECRET) {
-    try {
-        initCircleClient(CIRCLE_API_KEY, CIRCLE_ENTITY_SECRET);
-        console.log("✅ Circle MCP Client initialized");
-    } catch (e) {
-        console.error("❌ Failed to initialize Circle MCP:", e);
-    }
-}
-
 // Initialize Supabase
 const supabaseEnabled = initSupabase();
 if (supabaseEnabled) {
     console.log("✅ Supabase initialized");
 }
 
-// Initialize Price Oracle Wallet (async)
-if (CIRCLE_API_KEY && CIRCLE_ENTITY_SECRET) {
-    initOracleWallet()
-        .then((wallet) => {
-            console.log(`✅ Price Oracle Wallet: ${wallet.address}`);
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize Oracle wallet:", err.message);
-        });
+void ensureAgentPoliciesReady().catch((error) => {
+    console.warn('[Policy] Failed to preload agent policies:', (error as Error).message);
+});
 
-    // Initialize Chat Agent Wallet (async)
-    initChatWallet()
-        .then((wallet) => {
-            console.log(`✅ Chat Agent Wallet: ${wallet.address}`);
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize Chat wallet:", err.message);
-        });
+let x402SellerAddresses = getSellerAddressMap();
+let x402InitStatus: 'pending' | 'ready' | 'failed' = 'pending';
+let x402InitError: string | null = null;
 
-    // Initialize Chain Scout Wallet (async)
-    initScoutWallet()
-        .then((wallet) => {
-            console.log(`✅ Chain Scout Wallet: ${wallet.address}`);
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize Chain Scout wallet:", err.message);
-        });
+async function initializeX402PaymentsBackground() {
+    const timeoutMs = Number(process.env.X402_INIT_TIMEOUT_MS || 15000);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`x402 init timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
 
-    // Initialize News Scout Wallet (async)
-    initNewsScoutWallet()
-        .then((wallet) => {
-            console.log(`✅ News Scout Wallet: ${wallet.address}`);
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize News Scout wallet:", err.message);
-        });
-
-    // Initialize Yield Optimizer Wallet (async)
-    initYieldWallet()
-        .then((wallet) => {
-            console.log(`✅ Yield Optimizer Wallet: ${wallet.address}`);
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize Yield Optimizer wallet:", err.message);
-        });
-
-    // Initialize Tokenomics Wallet (async)
-    initTokenomicsWallet()
-        .then((wallet) => {
-            console.log(`✅ Tokenomics Analyzer Wallet: ${wallet.address}`);
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize Tokenomics wallet:", err.message);
-        });
-
-    // Initialize NFT Scout Wallet (async)
-    initNftScoutWallet()
-        .then((wallet) => {
-            console.log(`✅ NFT Scout Wallet: ${wallet.address}`);
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize NFT Scout wallet:", err.message);
-        });
-
-    // Initialize x402 Gasless Payments
-    initX402Payments(PRIVATE_KEY)
-        .then(() => {
-            console.log(`✅ x402 Gasless Payments: Ready`);
-
-            // Start auto-refill service after x402 is ready
-            initAutoRefillClient(PRIVATE_KEY);
-            startAutoRefillService();
-
-            // Start auto-withdraw for agent earnings
-            startAutoWithdraw();
-        })
-        .catch((err) => {
-            console.error("❌ Failed to initialize x402 payments:", err.message);
-        });
+    try {
+        const x402Init = await Promise.race([
+            initX402Payments(PRIVATE_KEY),
+            timeoutPromise,
+        ]);
+        x402SellerAddresses = x402Init.sellerAddresses;
+        x402InitStatus = 'ready';
+        x402InitError = null;
+        console.log(`✅ x402 Buyer: Ready (${getX402BuyerSource()})`);
+    } catch (err) {
+        x402InitStatus = 'failed';
+        x402InitError = (err as Error).message;
+        console.error("❌ Failed to initialize x402 payments:", x402InitError);
+        console.warn("⚠️ x402 routes started with existing configured seller addresses.");
+    }
 }
 
 // --- API Routes ---
@@ -220,17 +228,18 @@ app.get("/health", (req, res) => {
         chain: config.chain.name,
         contracts: config.contracts,
         geminiEnabled: !!GEMINI_API_KEY,
-    });
-});
-
-// Debug endpoint to check env vars (Remove after use)
-app.get("/debug/env", (req, res) => {
-    res.json({
-        perpStatsAddress: process.env.PERP_STATS_X402_ADDRESS || "MISSING",
+        supabaseEnabled: !!getSupabase(),
+        x402: {
+            buyerSigner: getX402BuyerSource(),
+            network: "eip155:84532",
+            initStatus: x402InitStatus,
+            initError: x402InitError,
+        },
     });
 });
 
 // x402 Agent Routes (Seller Endpoints)
+const x402AgentRoutes = buildX402AgentRoutes({ sellerAddresses: x402SellerAddresses });
 app.use("/api/x402", x402AgentRoutes);
 console.log("✅ x402 Seller Endpoints: Mounted at /api/x402");
 
@@ -280,7 +289,14 @@ app.post("/agent/register", async (req, res) => {
 // Process a query (user-facing endpoint)
 app.post("/query", queryLimiter, async (req, res) => {
     try {
-        const { query, txHash, userAddress, imageData, conversationHistory } = req.body;
+        const { query, txHash, userAddress, imageData, conversationHistory, sessionId, budgetUsd } = req.body;
+        const budgetLimitUsd = Number(
+            budgetUsd ??
+            req.query.budgetUsd ??
+            req.query.budget ??
+            process.env.X402_DEFAULT_BUDGET_USD ??
+            1
+        );
 
         // Allow image-only queries
         if (!query && !imageData) {
@@ -322,11 +338,45 @@ app.post("/query", queryLimiter, async (req, res) => {
                 const startTime = Date.now();
                 let aiResponse = "";
                 let agentsUsed: string[] = [];
+                let trace: any = null;
+                let x402SpendUsd = 0;
 
                 try {
-                    const result = await generateResponse(query || '', imageData, conversationHistory);
+                    const traceId = `trace-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                    const result = await generateResponse(
+                        query || '',
+                        imageData,
+                        conversationHistory,
+                        {
+                            sessionId,
+                            budgetUsd: budgetLimitUsd,
+                            traceId,
+                        }
+                    );
                     aiResponse = result.response;
                     agentsUsed = result.agentsUsed;
+                    trace = result.trace;
+                    x402SpendUsd = result.totalSpendUsd;
+
+                    if (trace) {
+                        x402TraceById.set(trace.traceId, trace);
+                        if (trace.sessionId) {
+                            x402TraceBySession.set(trace.sessionId, trace);
+                        }
+
+                        await saveX402Trace({
+                            traceId: trace.traceId,
+                            sessionId: trace.sessionId,
+                            userPrompt: trace.userPrompt,
+                            limitUsd: trace.budget.limitUsd,
+                            spentUsdStart: trace.budget.spentUsdStart,
+                            spentUsdEnd: trace.budget.spentUsdEnd,
+                            remainingUsdEnd: trace.budget.remainingUsdEnd,
+                            createdAt: trace.createdAt,
+                            steps: trace.steps,
+                        });
+                    }
+
                     // Log query with x402 transaction hash per agent (not user's payment tx)
                     const responseTimeMs = Date.now() - startTime;
                     for (const agentId of agentsUsed) {
@@ -355,6 +405,14 @@ app.post("/query", queryLimiter, async (req, res) => {
                     agentsUsed: agentsUsed,
                     cost: paymentAmount,
                     txHash: txHash,
+                    traceId: trace?.traceId,
+                    totalSpendUsd: x402SpendUsd,
+                    trace: trace ? {
+                        traceId: trace.traceId,
+                        totalSpendUsd: x402SpendUsd,
+                        budget: trace.budget,
+                        steps: trace.steps,
+                    } : null,
                 });
             } catch (verifyError) {
                 console.error(`[Query] Payment verification failed:`, verifyError);
@@ -412,110 +470,117 @@ app.get("/providers", async (req, res) => {
             // Chat agent not available
         }
 
-        // Add Price Oracle
-        const oracleAddress = getOracleAddress();
-        if (oracleAddress) {
-            providers.push({
-                agentId: "oracle",
-                name: "Price Oracle Agent",
-                wallet: oracleAddress,
-                price: "0.01",
-                active: true,
-                serviceType: "oracle",
-                category: "DeFi",
-                description: "Real-time cryptocurrency prices from CoinGecko. Supports BTC, ETH, SOL, and 100+ tokens.",
-            });
-        }
+        const sellerMap = getSellerAddressMap();
 
-        // Add Chain Scout (On-Chain Analytics)
-        const scoutAddress = getScoutAddress();
-        if (scoutAddress) {
-            providers.push({
-                agentId: "scout",
-                name: "Chain Scout",
-                wallet: scoutAddress,
-                price: "0.02",
-                active: true,
-                serviceType: "analytics",
-                category: "Analytics",
-                description: "Wallet analytics, protocol TVL, DEX volume, bridges, and exploit tracking.",
-            });
-        }
+        providers.push({
+            agentId: "oracle",
+            name: "Price Oracle Agent",
+            wallet: sellerMap.oracle,
+            price: "0.01",
+            active: true,
+            serviceType: "oracle",
+            category: "DeFi",
+            description: "Real-time cryptocurrency prices from CoinGecko. Supports BTC, ETH, SOL, and 100+ tokens.",
+            pricingModel: "per-call-fixed",
+            paidTools: true,
+        });
 
-        // Add News Scout
-        const newsScoutAddress = getNewsScoutAddress();
-        if (newsScoutAddress) {
-            providers.push({
-                agentId: "news",
-                name: "News Scout",
-                wallet: newsScoutAddress,
-                price: "0.01",
-                active: true,
-                serviceType: "news",
-                category: "Analytics",
-                description: "Real-time crypto news aggregator, sentiment analysis, and trending topics.",
-            });
-        }
+        providers.push({
+            agentId: "scout",
+            name: "Chain Scout",
+            wallet: sellerMap.scout,
+            price: "0.01",
+            active: true,
+            serviceType: "analytics",
+            category: "Analytics",
+            description: "Wallet analytics, protocol TVL, DEX volume, bridges, and exploit tracking.",
+            pricingModel: "per-call-fixed",
+            paidTools: true,
+        });
 
-        // Add Yield Optimizer
-        const yieldAddress = getYieldAddress();
-        if (yieldAddress) {
-            providers.push({
-                agentId: "yield",
-                name: "Yield Optimizer",
-                wallet: yieldAddress,
-                price: "0.01",
-                active: true,
-                serviceType: "defi",
-                category: "DeFi",
-                description: "DeFi yield aggregator from Lido, Yearn, Beefy, Curve, Aave, and Pendle. Compares APYs across protocols.",
-            });
-        }
+        providers.push({
+            agentId: "news",
+            name: "News Scout",
+            wallet: sellerMap.news,
+            price: "0.01",
+            active: true,
+            serviceType: "news",
+            category: "Analytics",
+            description: "Real-time crypto news aggregator, sentiment analysis, and trending topics.",
+            pricingModel: "per-call-fixed",
+            paidTools: true,
+        });
 
-        // Add Tokenomics Analyzer
-        const tokenomicsAddress = getTokenomicsAddress();
-        if (tokenomicsAddress) {
-            providers.push({
-                agentId: "tokenomics",
-                name: "Tokenomics Analyzer",
-                wallet: tokenomicsAddress,
-                price: "0.02",
-                active: true,
-                serviceType: "research",
-                category: "Research",
-                description: "Token supply analysis, vesting schedules, unlock events, and inflation rates for ARB, OP, SUI, APT, and more.",
-            });
-        }
+        providers.push({
+            agentId: "yield",
+            name: "Yield Optimizer",
+            wallet: sellerMap.yield,
+            price: "0.01",
+            active: true,
+            serviceType: "defi",
+            category: "DeFi",
+            description: "DeFi yield aggregator from Lido, Yearn, Beefy, Curve, Aave, and Pendle. Compares APYs across protocols.",
+            pricingModel: "per-call-fixed",
+            paidTools: true,
+        });
 
-        // Add NFT Scout
-        const nftScoutAddress = getNftScoutAddress();
-        if (nftScoutAddress) {
-            providers.push({
-                agentId: "nft",
-                name: "NFT Scout",
-                wallet: nftScoutAddress,
-                price: "0.02",
-                active: true,
-                serviceType: "nft",
-                category: "NFT",
-                description: "NFT collection analytics, floor prices, volume trends, and sales history for OpenSea collections.",
-            });
-        }
+        providers.push({
+            agentId: "tokenomics",
+            name: "Tokenomics Analyzer",
+            wallet: sellerMap.tokenomics,
+            price: "0.02",
+            active: true,
+            serviceType: "research",
+            category: "Research",
+            description: "Token supply analysis, vesting schedules, unlock events, and inflation rates for ARB, OP, SUI, APT, and more.",
+            pricingModel: "per-call-fixed",
+            paidTools: true,
+        });
 
-        // Add Perp Stats Agent
-        const perpStatsAddress = process.env.PERP_STATS_X402_ADDRESS;
-        if (perpStatsAddress) {
-            providers.push({
-                agentId: "perp",
-                name: "Universal Perp Stats",
-                wallet: perpStatsAddress,
-                price: "0.02",
-                active: true,
-                serviceType: "perp",
-                category: "Trading",
-                description: "Real-time aggregated funding rates, open interest, and volume from Hyperliquid, dYdX, and 5+ other DEXs.",
-            });
-        }
+        providers.push({
+            agentId: "nft",
+            name: "NFT Scout",
+            wallet: sellerMap.nft,
+            price: "0.02",
+            active: true,
+            serviceType: "nft",
+            category: "NFT",
+            description: "NFT collection analytics, floor prices, volume trends, and sales history for OpenSea collections.",
+            pricingModel: "per-call-fixed",
+            paidTools: true,
+        });
+
+        providers.push({
+            agentId: "perp",
+            name: "Universal Perp Stats",
+            wallet: sellerMap.perp,
+            price: "0.02",
+            active: true,
+            serviceType: "perp",
+            category: "Trading",
+            description: "Real-time aggregated funding rates, open interest, and volume from Hyperliquid, dYdX, and 5+ other DEXs.",
+            pricingModel: "per-call-fixed",
+            paidTools: true,
+        });
+
+        const providersWithPolicy = await Promise.all(
+            providers.map(async (provider) => {
+                const parsedAgentId = parseAgentId(String(provider.agentId));
+                if (!parsedAgentId) {
+                    return {
+                        ...provider,
+                        isFrozen: false,
+                    };
+                }
+
+                const frozen = await isAgentFrozen(parsedAgentId);
+                return {
+                    ...provider,
+                    active: provider.active && !frozen,
+                    isFrozen: frozen,
+                };
+            }),
+        );
 
         // Get per-agent stats from database
         const agentStats = await getAllAgentStats();
@@ -523,8 +588,8 @@ app.get("/providers", async (req, res) => {
 
         // Filter by service type if specified
         const filtered = serviceType
-            ? providers.filter(p => p.serviceType === serviceType || serviceType === "")
-            : providers;
+            ? providersWithPolicy.filter(p => p.serviceType === serviceType || serviceType === "")
+            : providersWithPolicy;
 
         // Add per-agent stats to each provider
         const providersWithStats = filtered.map(p => {
@@ -568,55 +633,76 @@ app.get("/agent/pending", async (req, res) => {
 
 // Dashboard stats
 app.get("/dashboard/stats", async (req, res) => {
-    const agentId = req.query.agentId as string;
+    const agentIdParam = req.query.agentId as string | undefined;
 
     try {
         // If agentId is provided, return stats for that specific agent
-        if (agentId) {
+        if (agentIdParam) {
+            const agentId = parseAgentId(agentIdParam);
+            if (!agentId) {
+                return res.status(400).json({ error: `Unsupported agentId: ${agentIdParam}` });
+            }
             // Use optimized single-agent lookup instead of fetching all agents
             const stats = await getAgentStatsById(agentId);
+            const sellerMap = getSellerAddressMap();
 
             // Get agent x402 payment wallet address for balance lookup (these have the actual funds)
             let walletAddress: string | null = null;
-            let agentName = agentId;
+            let agentName: string = agentId;
 
             switch (agentId) {
                 case 'oracle':
-                    walletAddress = process.env.ORACLE_X402_ADDRESS || '0xbaFF2E0939f89b53d4caE023078746C2eeA6E2F7';
+                    walletAddress = sellerMap.oracle;
                     agentName = 'Price Oracle Agent';
                     break;
                 case 'scout':
-                    walletAddress = process.env.SCOUT_X402_ADDRESS || '0xf09bC01bEb00b142071b648c4826Ab48572aEea5';
+                    walletAddress = sellerMap.scout;
                     agentName = 'Chain Scout';
                     break;
                 case 'news':
-                    walletAddress = process.env.NEWS_X402_ADDRESS || '0x32a6778E4D6634BaB9e54A9F78ff5D087179a5c4';
+                    walletAddress = sellerMap.news;
                     agentName = 'News Scout';
                     break;
                 case 'yield':
-                    walletAddress = process.env.YIELD_X402_ADDRESS || '0x095691C40335E7Da13ca669EE3A07eB7422e2be3';
+                    walletAddress = sellerMap.yield;
                     agentName = 'Yield Optimizer';
                     break;
                 case 'tokenomics':
-                    walletAddress = process.env.TOKENOMICS_X402_ADDRESS || '0xc99A4f20E7433d0B6fB48ca805Ffebe989e48Ca6';
+                    walletAddress = sellerMap.tokenomics;
                     agentName = 'Tokenomics Analyzer';
                     break;
                 case 'nft':
-                    walletAddress = process.env.NFT_SCOUT_X402_ADDRESS || '0xEb6d935822e643Af37ec7C6a7Bd6136c0036Cd69';
+                    walletAddress = sellerMap.nft;
                     agentName = 'NFT Scout';
                     break;
                 case 'perp':
-                    walletAddress = process.env.PERP_STATS_X402_ADDRESS || '0x89651811043ba5a04d44b17462d07a0e3cf0565e';
+                    walletAddress = sellerMap.perp;
                     agentName = 'Universal Perp Stats';
                     break;
             }
+
+            const frozen = await isAgentFrozen(agentId);
 
             // Fetch real wallet balance
             let balanceUsd = "0.00";
             if (walletAddress) {
                 try {
-                    const balanceWei = await publicClient.getBalance({ address: walletAddress as `0x${string}` });
-                    balanceUsd = parseFloat(formatEther(balanceWei)).toFixed(2);
+                    const usdcAddress = config.tokens.usdc;
+                    const [usdcRaw, usdcDecimals] = await Promise.all([
+                        publicClient.readContract({
+                            address: usdcAddress,
+                            abi: ERC20_BALANCE_ABI,
+                            functionName: "balanceOf",
+                            args: [walletAddress as `0x${string}`],
+                        }) as Promise<bigint>,
+                        publicClient.readContract({
+                            address: usdcAddress,
+                            abi: ERC20_BALANCE_ABI,
+                            functionName: "decimals",
+                        }) as Promise<number>,
+                    ]);
+
+                    balanceUsd = parseFloat(formatUnits(usdcRaw, Number(usdcDecimals))).toFixed(2);
                 } catch (e) {
                     console.error(`[Dashboard] Failed to fetch balance for ${agentId}:`, e);
                 }
@@ -631,7 +717,7 @@ app.get("/dashboard/stats", async (req, res) => {
                 rating: stats?.rating || 0,
                 totalRatings: stats?.totalRatings || 0,
                 avgResponseTime: stats?.avgResponseTimeMs ? (stats.avgResponseTimeMs / 1000).toFixed(1) + 's' : '0s',
-                isFrozen: false,
+                isFrozen: frozen,
             });
             return;
         }
@@ -651,6 +737,7 @@ app.get("/dashboard/stats", async (req, res) => {
 // Recent activity for agent dashboard
 app.get("/dashboard/activity", async (req, res) => {
     const agentId = req.query.agentId as string;
+    const sessionId = req.query.sessionId as string | undefined;
     const limit = parseInt(req.query.limit as string) || 10;
 
     if (!agentId) {
@@ -658,18 +745,29 @@ app.get("/dashboard/activity", async (req, res) => {
     }
 
     try {
-        const queries = await getRecentQueries(agentId, limit);
-
-        // Transform to activity format
-        const activities = queries.map(q => ({
-            id: q.id,
-            type: 'Query Processed',
-            timestamp: q.createdAt,
-            action: 'received' as const,
-            responseTimeMs: q.responseTimeMs,
-            amount: 0.01, // Query price (simplified)
-            txHash: q.txHash
-        }));
+        res.set("Cache-Control", "no-store");
+        const paidActivity = await getRecentX402Payments(agentId, limit, sessionId);
+        const activities = paidActivity.length > 0
+            ? paidActivity.map((p) => ({
+                id: p.id,
+                type: "Query Processed",
+                timestamp: p.settledAt,
+                action: "received" as const,
+                responseTimeMs: p.latencyMs,
+                amount: Number(p.amountUsd || 0),
+                txHash: p.txHash,
+                receiptRef: p.receiptRef,
+                endpoint: p.endpoint,
+            }))
+            : (await getRecentQueries(agentId, limit)).map((q) => ({
+                id: q.id,
+                type: "Query Processed",
+                timestamp: q.createdAt,
+                action: "received" as const,
+                responseTimeMs: q.responseTimeMs,
+                amount: 0.01,
+                txHash: q.txHash,
+            }));
 
         res.json({ activities });
     } catch (error) {
@@ -677,132 +775,180 @@ app.get("/dashboard/activity", async (req, res) => {
     }
 });
 
-// Faucet Endpoint (Circle MCP)
-app.post("/faucet", faucetLimiter, async (req, res) => {
-    const { address } = req.body;
+// Spend summary + receipts + decision log for demo sessions
+app.get("/dashboard/spend", async (req, res) => {
+    const sessionId = req.query.sessionId as string | undefined;
+    const agentIdRaw = req.query.agentId as string | undefined;
+    const agentId = agentIdRaw ? agentIdRaw.toLowerCase() : undefined;
+    const limit = Number(req.query.limit || 50);
 
-    if (!address) {
-        return res.status(400).json({ error: "Address required" });
-    }
-
-    if (!CIRCLE_API_KEY) {
-        // Mock success in demo/no-key mode
-        return res.json({ success: true, message: "Mock faucet funding successful" });
+    if (!sessionId) {
+        return res.status(400).json({ error: "sessionId required" });
     }
 
     try {
-        await requestTestnetTokens(address);
-        res.json({ success: true, message: "Funds requested from Circle Faucet" });
+        res.set("Cache-Control", "no-store");
+        const localSummary = getSessionSpendSummary(sessionId);
+        const dbSummary = await getSessionSpendFromDb(sessionId);
+        const trace = x402TraceBySession.get(sessionId);
+
+        const receiptsPoolLimit = agentId ? 100 : limit;
+        const receiptsFromMemory = getRecentReceipts(sessionId, receiptsPoolLimit);
+        const normalizeReceipts = (input: Array<any>) => input.map((r) => ({
+            agentId: r.agentId,
+            endpoint: r.endpoint,
+            amount: r.amount,
+            amountUsd: r.amountUsd,
+            payTo: r.payTo,
+            txHash: r.txHash || null,
+            receiptRef: r.receiptRef || null,
+            settlePayer: r.settlePayer || null,
+            settleNetwork: r.settleNetwork || null,
+            settleTxHash: r.settleTxHash || null,
+            facilitatorSettlementId: r.facilitatorSettlementId || null,
+            facilitatorPaymentId: r.facilitatorPaymentId || null,
+            paymentResponseHeader: r.paymentResponseHeader || null,
+            paymentResponseHash: r.paymentResponseHeaderHash || null,
+            settleResponse: r.settleResponse || null,
+            settleResponseHash: r.settleResponseHash || null,
+            settleExtensions: r.settleExtensions || null,
+            paymentPayload: r.paymentPayload || null,
+            paymentPayloadHash: r.paymentPayloadHash || null,
+            settledAt: r.settledAt,
+            success: r.success,
+            latencyMs: r.latencyMs,
+        }));
+
+        const filterByAgent = (rows: Array<any>) => {
+            if (!agentId) return rows;
+            return rows.filter((r) => String(r.agentId || "").toLowerCase() === agentId);
+        };
+
+        const localReceipts = filterByAgent(normalizeReceipts(receiptsFromMemory));
+        const dbReceipts = filterByAgent(dbSummary?.receipts || []);
+        const receipts = (localReceipts.length > 0 ? localReceipts : dbReceipts).slice(0, limit);
+
+        const traceSteps = Array.isArray(trace?.steps) ? trace.steps : [];
+        const decisionLog = agentId
+            ? traceSteps.filter((step: any) => inferAgentIdFromTraceStep(step) === agentId)
+            : traceSteps;
+
+        const totalSpendFromReceipts = receipts
+            .filter((r: any) => r.success)
+            .reduce((sum: number, r: any) => sum + Number(r.amountUsd || 0), 0);
+        const paidCallsFromReceipts = receipts.filter((r: any) => r.success).length;
+
+        const totalSpendUsd = agentId
+            ? Number(totalSpendFromReceipts.toFixed(6))
+            : (localSummary.totalSpendUsd > 0 ? localSummary.totalSpendUsd : (dbSummary?.totalSpendUsd || 0));
+
+        const paidCalls = agentId
+            ? paidCallsFromReceipts
+            : (localSummary.paidCalls > 0 ? localSummary.paidCalls : (dbSummary?.paidCalls || 0));
+
+        return res.json({
+            sessionId,
+            agentId: agentId || null,
+            totalSpendUsd,
+            paidCalls,
+            budget: trace?.budget || {
+                limitUsd: Number(process.env.X402_DEFAULT_BUDGET_USD || 1),
+                spentUsdStart: 0,
+                spentUsdEnd: totalSpendUsd,
+                remainingUsdEnd: Math.max(0, Number(process.env.X402_DEFAULT_BUDGET_USD || 1) - totalSpendUsd),
+            },
+            receipts,
+            decisionLog,
+            traceId: trace?.traceId || null,
+            updatedAt: localSummary.updatedAt,
+        });
     } catch (error) {
-        console.error("Faucet error:", error);
-        const params = JSON.stringify((error as any).response?.data || {});
-        res.status(500).json({ error: `Request failed: ${(error as Error).message} ${params}` });
+        return res.status(500).json({ error: (error as Error).message });
     }
 });
 
-// CCTP Deposit Endpoint - Routes deposits through backend using Bridge Kit
-app.post("/cctp/deposit", async (req, res) => {
-    const { sourceChain, amount, recipientAddress } = req.body;
-
-    if (!sourceChain || !amount || !recipientAddress) {
-        return res.status(400).json({
-            success: false,
-            error: "Missing required fields: sourceChain, amount, recipientAddress"
-        });
-    }
-
-    if (!PRIVATE_KEY) {
-        return res.status(500).json({
-            success: false,
-            error: "Server not configured for CCTP deposits (no private key)"
-        });
-    }
-
-    // Map frontend chain names to Bridge Kit chain identifiers
-    const chainMap: Record<string, string> = {
-        'Ethereum Sepolia': 'Ethereum_Sepolia',
-        'Polygon Amoy': 'Polygon_Amoy_Testnet',
-        'Arbitrum Sepolia': 'Arbitrum_Sepolia',
-        'Optimism Sepolia': 'Optimism_Sepolia',
-        'Base Sepolia': 'Base_Sepolia'
-    };
-
-    const bridgeChain = chainMap[sourceChain];
-    if (!bridgeChain) {
-        return res.status(400).json({
-            success: false,
-            error: `Unsupported chain: ${sourceChain}`
-        });
+// Admin policy endpoints
+app.get("/admin/policy", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
     }
 
     try {
-        console.log(`\n🚀 CCTP Deposit: ${amount} USDC from ${sourceChain} to Arc Testnet`);
-        console.log(`   Recipient: ${recipientAddress}`);
+        const policies = await getAllAgentPolicies();
+        res.json({ success: true, policies });
+    } catch (error) {
+        res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
 
-        // Dynamic import to avoid loading Bridge Kit if not needed
-        const { BridgeKit } = await import('@circle-fin/bridge-kit');
-        const { createAdapterFromPrivateKey } = await import('@circle-fin/adapter-viem-v2');
+app.get("/admin/policy/:agentId", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
 
-        const adapter = createAdapterFromPrivateKey({
-            privateKey: PRIVATE_KEY
-        });
+    const agentId = parseAgentId(req.params.agentId);
+    if (!agentId) {
+        return res.status(400).json({ success: false, error: `Unsupported agentId: ${req.params.agentId}` });
+    }
 
-        const kit = new BridgeKit();
+    try {
+        const policy = await getAgentPolicy(agentId);
+        res.json({ success: true, policy });
+    } catch (error) {
+        res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
 
-        const result = await kit.bridge({
-            from: {
-                adapter,
-                chain: bridgeChain as any
-            },
-            to: {
-                adapter,
-                chain: 'Arc_Testnet' as any,
-                recipientAddress: recipientAddress
-            },
-            amount: amount,
-            token: 'USDC'
-        });
+app.post("/admin/policy/:agentId/freeze", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
 
-        console.log(`   Result: ${result.state}`);
+    const agentId = parseAgentId(req.params.agentId);
+    if (!agentId) {
+        return res.status(400).json({ success: false, error: `Unsupported agentId: ${req.params.agentId}` });
+    }
 
-        if (result.state === 'success') {
-            const burnTx = result.steps?.find((s: any) => s.name === 'burn')?.txHash;
-            const mintTx = result.steps?.find((s: any) => s.name === 'mint')?.txHash;
+    if (typeof req.body?.frozen !== 'boolean') {
+        return res.status(400).json({ success: false, error: "Body must include boolean 'frozen'" });
+    }
 
-            res.json({
-                success: true,
-                state: result.state,
-                amount: result.amount,
-                burnTxHash: burnTx,
-                mintTxHash: mintTx,
-                steps: result.steps?.map((s: any) => ({
-                    name: s.name,
-                    state: s.state,
-                    txHash: s.txHash,
-                    explorerUrl: s.explorerUrl
-                }))
-            });
-        } else {
-            const failedStep = result.steps?.find((s: any) => s.state === 'error' || s.state === 'failed');
-            res.status(500).json({
-                success: false,
-                state: result.state,
-                error: (failedStep as any)?.errorMessage || 'Bridge failed',
-                steps: result.steps?.map((s: any) => ({
-                    name: s.name,
-                    state: s.state,
-                    errorMessage: s.errorMessage
-                }))
-            });
-        }
+    const frozen = req.body.frozen as boolean;
+    const updatedBy = (req.body?.updatedBy as string | undefined) || (req.header('x-admin-user') || null);
 
-    } catch (error: any) {
-        console.error("CCTP Deposit error:", error);
-        res.status(500).json({
-            success: false,
-            error: error.message,
-            cause: error.cause?.trace || null
-        });
+    try {
+        const policy = await setAgentFrozen(agentId, frozen, updatedBy);
+        res.json({ success: true, policy });
+    } catch (error) {
+        res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.patch("/admin/policy/:agentId", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    const agentId = parseAgentId(req.params.agentId);
+    if (!agentId) {
+        return res.status(400).json({ success: false, error: `Unsupported agentId: ${req.params.agentId}` });
+    }
+
+    const patch = req.body || {};
+    const updatedBy = (patch.updatedBy as string | undefined) || (req.header('x-admin-user') || null);
+
+    try {
+        const policy = await updateAgentPolicy(agentId, {
+            frozen: typeof patch.frozen === 'boolean' ? patch.frozen : undefined,
+            dailyLimitUsd: typeof patch.dailyLimitUsd === 'number' ? patch.dailyLimitUsd : undefined,
+            perCallLimitUsd: typeof patch.perCallLimitUsd === 'number' ? patch.perCallLimitUsd : undefined,
+            allowedEndpoints: Array.isArray(patch.allowedEndpoints) ? patch.allowedEndpoints : undefined,
+            allowedPayTo: Array.isArray(patch.allowedPayTo) ? patch.allowedPayTo : undefined,
+        }, updatedBy);
+
+        res.json({ success: true, policy });
+    } catch (error) {
+        res.status(500).json({ success: false, error: (error as Error).message });
     }
 });
 
@@ -810,6 +956,10 @@ app.post("/cctp/deposit", async (req, res) => {
 
 // Get all chat sessions for a wallet
 app.get("/chat/sessions", async (req, res) => {
+    if (!getSupabase()) {
+        return res.status(503).json({ success: false, error: "Supabase unavailable. Check SUPABASE_URL/SUPABASE_ANON_KEY and restart backend." });
+    }
+
     const walletAddress = req.query.wallet as string;
     if (!walletAddress) {
         return res.status(400).json({ success: false, error: "Wallet address required" });
@@ -821,6 +971,10 @@ app.get("/chat/sessions", async (req, res) => {
 
 // Create a new chat session
 app.post("/chat/sessions", async (req, res) => {
+    if (!getSupabase()) {
+        return res.status(503).json({ success: false, error: "Supabase unavailable. Check SUPABASE_URL/SUPABASE_ANON_KEY and restart backend." });
+    }
+
     const { walletAddress, title } = req.body;
     if (!walletAddress) {
         return res.status(400).json({ success: false, error: "Wallet address required" });
@@ -828,7 +982,8 @@ app.post("/chat/sessions", async (req, res) => {
 
     const session = await createChatSession(walletAddress, title);
     if (!session) {
-        return res.status(500).json({ success: false, error: "Failed to create session" });
+        const detail = getLastSupabaseError();
+        return res.status(500).json({ success: false, error: detail || "Failed to create session" });
     }
 
     res.json({ success: true, session });
@@ -836,6 +991,10 @@ app.post("/chat/sessions", async (req, res) => {
 
 // Delete a chat session
 app.delete("/chat/sessions/:sessionId", async (req, res) => {
+    if (!getSupabase()) {
+        return res.status(503).json({ success: false, error: "Supabase unavailable. Check SUPABASE_URL/SUPABASE_ANON_KEY and restart backend." });
+    }
+
     const { sessionId } = req.params;
     const walletAddress = req.query.wallet as string;
     if (!walletAddress) {
@@ -848,6 +1007,10 @@ app.delete("/chat/sessions/:sessionId", async (req, res) => {
 
 // Get messages for a session
 app.get("/chat/sessions/:sessionId/messages", async (req, res) => {
+    if (!getSupabase()) {
+        return res.status(503).json({ success: false, error: "Supabase unavailable. Check SUPABASE_URL/SUPABASE_ANON_KEY and restart backend." });
+    }
+
     const { sessionId } = req.params;
     const messages = await getMessages(sessionId);
     res.json({ success: true, messages });
@@ -855,12 +1018,17 @@ app.get("/chat/sessions/:sessionId/messages", async (req, res) => {
 
 // Save a message to a session
 app.post("/chat/sessions/:sessionId/messages", async (req, res) => {
+    if (!getSupabase()) {
+        return res.status(503).json({ success: false, error: "Supabase unavailable. Check SUPABASE_URL/SUPABASE_ANON_KEY and restart backend." });
+    }
+
     const { sessionId } = req.params;
     const { id, content, is_user, escrow_id, tx_hash, image_preview } = req.body;
 
     const message = await saveMessage(sessionId, { id, content, is_user, escrow_id, tx_hash, image_preview });
     if (!message) {
-        return res.status(500).json({ success: false, error: "Failed to save message" });
+        const detail = getLastSupabaseError();
+        return res.status(500).json({ success: false, error: detail || "Failed to save message" });
     }
 
     res.json({ success: true, message });
@@ -868,6 +1036,10 @@ app.post("/chat/sessions/:sessionId/messages", async (req, res) => {
 
 // Clear all messages in a session
 app.delete("/chat/sessions/:sessionId/messages", async (req, res) => {
+    if (!getSupabase()) {
+        return res.status(503).json({ success: false, error: "Supabase unavailable. Check SUPABASE_URL/SUPABASE_ANON_KEY and restart backend." });
+    }
+
     const { sessionId } = req.params;
     const success = await clearMessages(sessionId);
     res.json({ success });
@@ -877,17 +1049,8 @@ app.delete("/chat/sessions/:sessionId/messages", async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     const geminiLabel = GEMINI_API_KEY ? "✅ Gemini" : "❌ Gemini";
-
-    // Check Gateway Status
-    checkGatewayStatus().then(status => {
-        if (status.wallet && status.minter) {
-            console.log("✅ Circle Gateway & CCTP: Active");
-        } else {
-            console.log("⚠️ Circle Gateway/CCTP: Contracts not found");
-        }
-    });
 
     // ============ Message Ratings ============
 
@@ -967,149 +1130,6 @@ app.listen(PORT, () => {
         res.json({ success: true, data: prices });
     });
 
-    // Get Oracle wallet info
-    app.get("/oracle/wallet", async (req, res) => {
-        const { balance, address } = await getOracleBalance();
-        const agentInfo = getOracleAgentInfo();
-
-        res.json({
-            success: true,
-            name: agentInfo.name,
-            address: address,
-            balance: balance,
-            pricePerQuery: formatEther(agentInfo.price),
-        });
-    });
-
-    // Withdraw from Oracle wallet
-    app.post("/oracle/wallet/withdraw", async (req, res) => {
-        const { amount, destinationAddress } = req.body;
-
-        if (!amount || !destinationAddress) {
-            return res.status(400).json({ success: false, error: "Amount and destinationAddress required" });
-        }
-
-        try {
-            const result = await withdrawOracleFunds(amount, destinationAddress);
-            res.json({ success: true, ...result });
-        } catch (error) {
-            res.status(500).json({ success: false, error: (error as Error).message });
-        }
-    });
-
-    // Register Oracle agent on-chain
-    app.post("/oracle/register", async (req, res) => {
-        try {
-            console.log("[Oracle] Starting registration...");
-            const result = await registerOracleAgent(config.contracts.agentRegistry);
-            res.json({ success: true, ...result });
-        } catch (error: any) {
-            console.error("[Oracle] Registration failed:", error?.response?.data || error.message);
-            res.status(500).json({
-                success: false,
-                error: error?.response?.data?.message || error.message,
-                details: error?.response?.data
-            });
-        }
-    });
-
-    // Fund Oracle wallet with testnet tokens
-    app.post("/oracle/faucet", faucetLimiter, async (req, res) => {
-        try {
-            const address = getOracleAddress();
-            if (!address) {
-                return res.status(400).json({ success: false, error: "Oracle wallet not initialized" });
-            }
-
-            console.log(`[Oracle] Requesting testnet tokens for ${address}...`);
-            await requestTestnetTokens(address);
-
-            res.json({ success: true, address, message: "Testnet tokens requested. Check balance in a few seconds." });
-        } catch (error: any) {
-            console.error("[Oracle] Faucet error:", error?.response?.data || error.message);
-            res.status(500).json({ success: false, error: error.message });
-        }
-    });
-
-    // ============ Chat Agent Wallet ============
-
-    // Get Chat Agent wallet info
-    app.get("/chat-agent/wallet", async (req, res) => {
-        const { balance, address } = await getChatBalance();
-        res.json({
-            success: true,
-            name: "Chat Agent",
-            address: address,
-            balance: balance,
-        });
-    });
-
-    // Fund Chat Agent wallet with testnet tokens
-    app.post("/chat-agent/faucet", faucetLimiter, async (req, res) => {
-        try {
-            const address = getChatAddress();
-            if (!address) {
-                return res.status(400).json({ success: false, error: "Chat Agent wallet not initialized" });
-            }
-
-            console.log(`[Chat Agent] Requesting testnet tokens for ${address}...`);
-            await requestTestnetTokens(address);
-
-            res.json({ success: true, address, message: "Testnet tokens requested. Check balance in a few seconds." });
-        } catch (error: any) {
-            console.error("[Chat Agent] Faucet error:", error?.response?.data || error.message);
-            res.status(500).json({ success: false, error: error.message });
-        }
-    });
-
-    // ============ Agent-to-Agent Payments ============
-
-    // Get all agent wallet statuses
-    app.get("/agents/wallets", (req, res) => {
-        const status = getAgentWalletStatus();
-        res.json({ success: true, ...status });
-    });
-
-    // Create payment from Chat Agent to Oracle
-    app.post("/agents/pay-oracle", async (req, res) => {
-        const { task } = req.body;
-
-        if (!task) {
-            return res.status(400).json({ success: false, error: "Task description required" });
-        }
-
-        try {
-            const result = await createOraclePayment(task);
-            res.json({ success: true, ...result });
-        } catch (error: any) {
-            console.error("[Agent Payment] Error:", error?.response?.data || error.message);
-            res.status(500).json({
-                success: false,
-                error: error?.response?.data?.message || error.message
-            });
-        }
-    });
-
-    // Release escrow (Chat Agent pays Oracle)
-    app.post("/agents/release-escrow/:escrowId", async (req, res) => {
-        const escrowId = parseInt(req.params.escrowId);
-
-        if (isNaN(escrowId)) {
-            return res.status(400).json({ success: false, error: "Valid escrow ID required" });
-        }
-
-        try {
-            const result = await releaseOraclePayment(escrowId);
-            res.json({ success: true, ...result });
-        } catch (error: any) {
-            console.error("[Agent Payment] Release error:", error?.response?.data || error.message);
-            res.status(500).json({
-                success: false,
-                error: error?.response?.data?.message || error.message
-            });
-        }
-    });
-
     console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║          Agent Marketplace Backend                        ║
@@ -1120,4 +1140,15 @@ app.listen(PORT, () => {
 ║  ${geminiLabel.padEnd(54)}║
 ╚═══════════════════════════════════════════════════════════╝
   `);
+
+    // Start x402/CDP initialization after server is already reachable.
+    void initializeX402PaymentsBackground();
+});
+
+server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use. Stop the existing process or change PORT.`);
+        return;
+    }
+    console.error('❌ Backend server failed to start:', error.message);
 });

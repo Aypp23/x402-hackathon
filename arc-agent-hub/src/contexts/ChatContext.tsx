@@ -33,12 +33,12 @@ interface ChatContextType {
     createNewSession: (options?: { clearMessages?: boolean }) => Promise<string | null>;
     deleteSession: (sessionId: string) => Promise<void>;
     refreshSessions: () => Promise<void>;
-    saveMessageToDb: (message: Message) => Promise<void>;
+    saveMessageToDb: (message: Message, sessionIdOverride?: string) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
-const LOCAL_STORAGE_KEY = 'arc-chat-current-session';
+const LOCAL_STORAGE_KEY = 'x402-chat-current-session';
 
 export function ChatProvider({ children }: { children: ReactNode }) {
     const { address, isConnected } = useWallet();
@@ -118,19 +118,26 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ walletAddress: address }),
             });
-            const data = await res.json();
-            if (data.success) {
-                setCurrentSessionId(data.session.id);
-                if (shouldClearMessages) {
-                    setMessages([]);
-                    toast.success('New chat started');
-                }
-                await refreshSessions();
-                return data.session.id;
+
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data?.success || !data?.session?.id) {
+                throw new Error(data?.error || `HTTP ${res.status}`);
             }
+
+            setCurrentSessionId(data.session.id);
+            if (shouldClearMessages) {
+                setMessages([]);
+                toast.success('New chat started');
+            }
+            await refreshSessions();
+            return data.session.id;
         } catch (e) {
             console.error('Failed to create session:', e);
-            toast.error('Failed to create new chat');
+            const rawMessage = e instanceof Error ? e.message : 'Failed to create new chat';
+            const message = /Failed to fetch|NetworkError|Load failed/i.test(rawMessage)
+                ? `Cannot reach backend at ${API_BASE_URL}. Check VITE_API_URL and backend server.`
+                : rawMessage;
+            toast.error(`Failed to create new chat: ${message}`);
         }
         return null;
     }, [address, refreshSessions]);
@@ -153,11 +160,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }
     }, [address, currentSessionId, refreshSessions]);
 
-    const saveMessageToDb = useCallback(async (message: Message) => {
-        if (!currentSessionId) return;
+    const saveMessageToDb = useCallback(async (message: Message, sessionIdOverride?: string) => {
+        const targetSessionId = sessionIdOverride || currentSessionId;
+        if (!targetSessionId) return;
 
         try {
-            await fetch(`${API_BASE_URL}/chat/sessions/${currentSessionId}/messages`, {
+            const res = await fetch(`${API_BASE_URL}/chat/sessions/${targetSessionId}/messages`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -169,8 +177,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     image_preview: message.imagePreview,
                 }),
             });
+
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data?.success) {
+                throw new Error(data?.error || `HTTP ${res.status}`);
+            }
+
             // Refresh sessions to update titles
-            refreshSessions();
+            await refreshSessions();
         } catch (e) {
             console.error('Failed to save message:', e);
         }

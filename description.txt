@@ -6,9 +6,9 @@ In the rapidly evolving world of cryptocurrency, high-quality, real-time intelli
 
 **Unique Features & Benefits:**  
 *   **Multi-Agent Orchestration**: A single query triggers parallel work from specialized agents (Price Oracle, News Scout, Chain Scout, Perp Stats, Tokenomics, and NFT Scout).
-*   **Powered by x402**: We leverage Circle's x402 protocol to enable gasless, instant micro-payments between agents. This allows the main orchestrator to pay sub-agents for their work in real-time without network congestion or fees.
-*   **Pay-As-You-Go**: No subscriptions. Users pay a flat, transparent fee of $0.03 USDC per query directly on the Arc Testnet.
-*   **Universal Access**: With integrated Circle CCTP (Cross-Chain Transfer Protocol), users can seamlessly deposit USDC from any supported network to start using Arcana immediately.
+*   **Powered by x402**: We leverage x402 on Base Sepolia for fast micro-payments between agents. The orchestrator pays sub-agents per-call in real time.
+*   **Pay-As-You-Go**: No subscriptions. Users pay a flat, transparent fee of $0.03 USDC per query on Base Sepolia.
+*   **Universal Access**: Users can fund their wallet with testnet USDC and start using Arcana immediately.
 
 **Target Audience:**  
 Arcana is built for crypto traders, DeFi researchers, and enthusiasts who demand institutional-grade insights without the complexity. It bridges the gap between raw data and actionable intelligence, making advanced market analysis accessible to everyone via a simple chat interface.

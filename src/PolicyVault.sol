@@ -7,7 +7,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * @title PolicyVault
  * @notice Agent treasury with onchain spending policies
  * @dev Enforces daily spending limits, allowlists, and emergency freeze
- * @dev ASSET TYPE: Native ETH (on Arc, this represents native USDC at 18 decimals)
+ * @dev ASSET TYPE: Native token (ETH)
  * @dev AUDIT FIXES: Added ReentrancyGuard, zero address validation, clarified asset type
  */
 contract PolicyVault is ReentrancyGuard {
@@ -67,7 +67,7 @@ contract PolicyVault is ReentrancyGuard {
     }
     
     // --- Receive native ETH/USDC ---
-    /// @dev On Arc Network, native ETH represents USDC at 18 decimals
+    /// @dev Accepts native token deposits.
     receive() external payable {
         emit Deposit(msg.sender, msg.value);
     }
@@ -78,7 +78,7 @@ contract PolicyVault is ReentrancyGuard {
      * @notice Agent withdraws native ETH/USDC within policy limits
      * @dev AUDIT FIX: Added nonReentrant and zero address validation
      * @param to Recipient address (must be allowlisted and non-zero)
-     * @param amount Amount of native ETH/USDC (18 decimals on Arc)
+     * @param amount Amount of native token to transfer
      */
     function withdraw(address to, uint256 amount) external onlyAgent notFrozen nonReentrant {
         // AUDIT FIX: Zero address validation

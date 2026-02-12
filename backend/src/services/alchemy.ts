@@ -5,7 +5,7 @@ import { fetchTokenPrice, fetchTokenPricesBatch } from "./price-oracle.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Load .env relative to this file
-dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY;
 
@@ -706,4 +706,3 @@ export async function analyzeWallet(address: string): Promise<string> {
 
     return output;
 }
-

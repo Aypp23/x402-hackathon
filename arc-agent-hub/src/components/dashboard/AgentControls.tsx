@@ -14,21 +14,48 @@ import {
 import { toast } from 'sonner';
 
 interface AgentControlsProps {
+  agentId?: string;
   isActive: boolean;
   onToggle: () => void;
 }
 
-export function AgentControls({ isActive, onToggle }: AgentControlsProps) {
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const ADMIN_API_KEY = import.meta.env.VITE_ADMIN_API_KEY as string | undefined;
+
+export function AgentControls({ agentId, isActive, onToggle }: AgentControlsProps) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   const handleToggle = async () => {
     setIsLoading(true);
-    await new Promise(resolve => setTimeout(resolve, 800));
-    onToggle();
-    setIsLoading(false);
-    setIsModalOpen(false);
-    toast.success(isActive ? 'Agent has been frozen' : 'Agent has been reactivated');
+    try {
+      if (!agentId) {
+        throw new Error('No agent selected');
+      }
+
+      const res = await fetch(`${API_BASE_URL}/admin/policy/${agentId}/freeze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {}),
+          'x-admin-user': 'dashboard-ui',
+        },
+        body: JSON.stringify({ frozen: isActive }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `Failed to update policy (${res.status})`);
+      }
+
+      onToggle();
+      setIsModalOpen(false);
+      toast.success(isActive ? 'Agent has been frozen' : 'Agent has been reactivated');
+    } catch (error) {
+      toast.error((error as Error).message || 'Failed to update policy');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (

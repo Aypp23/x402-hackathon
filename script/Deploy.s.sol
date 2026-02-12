@@ -18,9 +18,8 @@ contract DeployAgentMarketplace is Script {
         PolicyVault vault = new PolicyVault(agentAddress, dailyLimit);
         console.log("PolicyVault deployed at:", address(vault));
         
-        // Deploy Escrow with USDC token address
-        // Arc Testnet native USDC: 0x3600000000000000000000000000000000000000
-        address usdcToken = 0x3600000000000000000000000000000000000000;
+        // Deploy Escrow with Base Sepolia USDC token address
+        address usdcToken = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
         Escrow escrow = new Escrow(usdcToken);
         console.log("Escrow deployed at:", address(escrow));
         

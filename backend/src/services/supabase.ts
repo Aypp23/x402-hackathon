@@ -1,6 +1,12 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 let supabase: SupabaseClient | null = null;
+let lastSupabaseError: string | null = null;
+
+function recordSupabaseError(context: string, error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    lastSupabaseError = `${context}: ${message}`;
+}
 
 export interface ChatMessage {
     id: string;
@@ -26,11 +32,13 @@ export function initSupabase() {
 
     if (!url || !key) {
         console.warn('[Supabase] Missing SUPABASE_URL or SUPABASE_ANON_KEY');
+        recordSupabaseError('init', 'Missing SUPABASE_URL or SUPABASE_ANON_KEY');
         return false;
     }
 
     supabase = createClient(url, key);
     console.log('[Supabase] Client initialized');
+    lastSupabaseError = null;
     return true;
 }
 
@@ -38,10 +46,17 @@ export function getSupabase(): SupabaseClient | null {
     return supabase;
 }
 
+export function getLastSupabaseError(): string | null {
+    return lastSupabaseError;
+}
+
 // ============ Chat Sessions ============
 
 export async function createChatSession(walletAddress: string, title: string = 'New Chat'): Promise<ChatSession | null> {
-    if (!supabase) return null;
+    if (!supabase) {
+        recordSupabaseError('createChatSession', 'Supabase not initialized');
+        return null;
+    }
 
     const { data, error } = await supabase
         .from('chat_sessions')
@@ -54,8 +69,11 @@ export async function createChatSession(walletAddress: string, title: string = '
 
     if (error) {
         console.error('[Supabase] Failed to create chat session:', error);
+        recordSupabaseError('createChatSession', error.message);
         return null;
     }
+
+    lastSupabaseError = null;
 
     return data;
 }
@@ -107,7 +125,10 @@ export async function saveMessage(
     sessionId: string,
     message: Pick<ChatMessage, 'id' | 'content' | 'is_user' | 'escrow_id' | 'tx_hash' | 'image_preview'>
 ): Promise<ChatMessage | null> {
-    if (!supabase) return null;
+    if (!supabase) {
+        recordSupabaseError('saveMessage', 'Supabase not initialized');
+        return null;
+    }
 
     const { data, error } = await supabase
         .from('chat_messages')
@@ -125,8 +146,11 @@ export async function saveMessage(
 
     if (error) {
         console.error('[Supabase] Failed to save message:', error);
+        recordSupabaseError('saveMessage', error.message);
         return null;
     }
+
+    lastSupabaseError = null;
 
     // Update session's updated_at
     await supabase
@@ -471,3 +495,319 @@ export async function getAllAgentStats(): Promise<AgentStats[]> {
     });
 }
 
+// ============ x402 Payment Logs / Traces ============
+
+export interface X402PaymentLog {
+    id: string;
+    sessionId?: string;
+    traceId?: string;
+    agentId: string;
+    endpoint: string;
+    method: string;
+    amount: string;
+    amountUsd: number;
+    network: string;
+    payTo: string;
+    receiptRef?: string;
+    txHash?: string;
+    settlePayer?: string;
+    settleNetwork?: string;
+    settleTxHash?: string;
+    facilitatorSettlementId?: string;
+    facilitatorPaymentId?: string;
+    paymentResponseHeader?: string;
+    paymentResponseHeaderHash?: string;
+    settleResponse?: Record<string, unknown>;
+    settleResponseHash?: string;
+    settleExtensions?: Record<string, unknown>;
+    paymentPayload?: Record<string, unknown>;
+    paymentPayloadHash?: string;
+    settledAt: string;
+    latencyMs: number;
+    success: boolean;
+    error?: string;
+}
+
+export interface X402SessionSpendSnapshot {
+    sessionId: string;
+    totalSpendUsd: number;
+    paidCalls: number;
+    updatedAt: string;
+}
+
+export interface X402TraceStepLog {
+    stepIndex: number;
+    toolName: string;
+    endpoint: string;
+    quotedPriceUsd: number;
+    reason: string;
+    budgetBeforeUsd: number;
+    budgetAfterUsd: number;
+    outcome: 'success' | 'skipped' | 'failed';
+    receiptRef?: string;
+    latencyMs?: number;
+}
+
+export interface X402TraceLog {
+    traceId: string;
+    sessionId?: string;
+    userPrompt?: string;
+    limitUsd: number;
+    spentUsdStart: number;
+    spentUsdEnd: number;
+    remainingUsdEnd: number;
+    createdAt: string;
+    steps: X402TraceStepLog[];
+}
+
+export async function logX402PaymentRecord(payment: X402PaymentLog): Promise<boolean> {
+    if (!supabase) return false;
+
+    const { error } = await supabase
+        .from('x402_payment_logs')
+        .insert({
+            id: payment.id,
+            session_id: payment.sessionId || null,
+            trace_id: payment.traceId || null,
+            agent_id: payment.agentId,
+            endpoint: payment.endpoint,
+            method: payment.method,
+            amount: payment.amount,
+            amount_usd: payment.amountUsd,
+            network: payment.network,
+            pay_to: payment.payTo,
+            receipt_ref: payment.receiptRef || null,
+            tx_hash: payment.txHash || null,
+            settle_payer: payment.settlePayer || null,
+            settle_network: payment.settleNetwork || null,
+            settle_tx_hash: payment.settleTxHash || null,
+            facilitator_settlement_id: payment.facilitatorSettlementId || null,
+            facilitator_payment_id: payment.facilitatorPaymentId || null,
+            payment_response_header: payment.paymentResponseHeader || null,
+            payment_response_hash: payment.paymentResponseHeaderHash || null,
+            settle_response: payment.settleResponse || null,
+            settle_response_hash: payment.settleResponseHash || null,
+            settle_extensions: payment.settleExtensions || null,
+            payment_payload: payment.paymentPayload || null,
+            payment_payload_hash: payment.paymentPayloadHash || null,
+            settled_at: payment.settledAt,
+            latency_ms: payment.latencyMs,
+            success: payment.success,
+            error: payment.error || null,
+        });
+
+    if (error) {
+        console.warn('[Supabase] Failed to log x402 payment:', error.message);
+        return false;
+    }
+
+    return true;
+}
+
+export async function saveSessionSpendSnapshot(snapshot: X402SessionSpendSnapshot): Promise<boolean> {
+    if (!supabase) return false;
+
+    const { error } = await supabase
+        .from('x402_session_spend')
+        .upsert({
+            session_id: snapshot.sessionId,
+            total_spend_usd: snapshot.totalSpendUsd,
+            paid_calls: snapshot.paidCalls,
+            updated_at: snapshot.updatedAt,
+        }, {
+            onConflict: 'session_id',
+        });
+
+    if (error) {
+        console.warn('[Supabase] Failed to save spend snapshot:', error.message);
+        return false;
+    }
+
+    return true;
+}
+
+export async function saveX402Trace(trace: X402TraceLog): Promise<boolean> {
+    if (!supabase) return false;
+
+    const { error: traceError } = await supabase
+        .from('x402_traces')
+        .upsert({
+            trace_id: trace.traceId,
+            session_id: trace.sessionId || null,
+            user_prompt: trace.userPrompt || null,
+            budget_limit_usd: trace.limitUsd,
+            spent_usd_start: trace.spentUsdStart,
+            spent_usd_end: trace.spentUsdEnd,
+            remaining_usd_end: trace.remainingUsdEnd,
+            created_at: trace.createdAt,
+        }, {
+            onConflict: 'trace_id',
+        });
+
+    if (traceError) {
+        console.warn('[Supabase] Failed to save x402 trace:', traceError.message);
+        return false;
+    }
+
+    if (trace.steps.length > 0) {
+        await supabase
+            .from('x402_trace_steps')
+            .delete()
+            .eq('trace_id', trace.traceId);
+
+        const rows = trace.steps.map(step => ({
+            trace_id: trace.traceId,
+            step_index: step.stepIndex,
+            tool_name: step.toolName,
+            endpoint: step.endpoint,
+            quoted_price_usd: step.quotedPriceUsd,
+            reason: step.reason,
+            budget_before_usd: step.budgetBeforeUsd,
+            budget_after_usd: step.budgetAfterUsd,
+            outcome: step.outcome,
+            receipt_ref: step.receiptRef || null,
+            latency_ms: step.latencyMs || null,
+        }));
+
+        const { error: stepsError } = await supabase
+            .from('x402_trace_steps')
+            .insert(rows);
+
+        if (stepsError) {
+            console.warn('[Supabase] Failed to save x402 trace steps:', stepsError.message);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+export async function getSessionSpendFromDb(sessionId: string): Promise<{
+    totalSpendUsd: number;
+    paidCalls: number;
+    receipts: Array<{
+        agentId: string;
+        endpoint: string;
+        amount: string;
+        amountUsd: number;
+        payTo: string;
+        txHash: string | null;
+        receiptRef: string | null;
+        settlePayer: string | null;
+        settleNetwork: string | null;
+        settleTxHash: string | null;
+        facilitatorSettlementId: string | null;
+        facilitatorPaymentId: string | null;
+        paymentResponseHeader: string | null;
+        paymentResponseHash: string | null;
+        settleResponse: Record<string, unknown> | null;
+        settleResponseHash: string | null;
+        settleExtensions: Record<string, unknown> | null;
+        paymentPayload: Record<string, unknown> | null;
+        paymentPayloadHash: string | null;
+        settledAt: string;
+        success: boolean;
+    }>;
+} | null> {
+    if (!supabase) return null;
+
+    const { data: summaryData, error: summaryError } = await supabase
+        .from('x402_session_spend')
+        .select('total_spend_usd, paid_calls')
+        .eq('session_id', sessionId)
+        .single();
+
+    if (summaryError && summaryError.code !== 'PGRST116') {
+        console.warn('[Supabase] Failed to load session spend summary:', summaryError.message);
+    }
+
+    const { data: receiptsData, error: receiptsError } = await supabase
+        .from('x402_payment_logs')
+        .select('agent_id, endpoint, amount, amount_usd, pay_to, tx_hash, receipt_ref, settle_payer, settle_network, settle_tx_hash, facilitator_settlement_id, facilitator_payment_id, payment_response_header, payment_response_hash, settle_response, settle_response_hash, settle_extensions, payment_payload, payment_payload_hash, settled_at, success')
+        .eq('session_id', sessionId)
+        .order('settled_at', { ascending: false })
+        .limit(100);
+
+    if (receiptsError) {
+        console.warn('[Supabase] Failed to load session receipts:', receiptsError.message);
+    }
+
+    return {
+        totalSpendUsd: summaryData?.total_spend_usd || 0,
+        paidCalls: summaryData?.paid_calls || 0,
+        receipts: (receiptsData || []).map((row: any) => ({
+            agentId: row.agent_id,
+            endpoint: row.endpoint,
+            amount: row.amount,
+            amountUsd: row.amount_usd,
+            payTo: row.pay_to,
+            txHash: row.tx_hash,
+            receiptRef: row.receipt_ref,
+            settlePayer: row.settle_payer,
+            settleNetwork: row.settle_network,
+            settleTxHash: row.settle_tx_hash,
+            facilitatorSettlementId: row.facilitator_settlement_id,
+            facilitatorPaymentId: row.facilitator_payment_id,
+            paymentResponseHeader: row.payment_response_header,
+            paymentResponseHash: row.payment_response_hash,
+            settleResponse: row.settle_response,
+            settleResponseHash: row.settle_response_hash,
+            settleExtensions: row.settle_extensions,
+            paymentPayload: row.payment_payload,
+            paymentPayloadHash: row.payment_payload_hash,
+            settledAt: row.settled_at,
+            success: row.success,
+        })),
+    };
+}
+
+export interface RecentX402Payment {
+    id: string;
+    agentId: string;
+    endpoint: string;
+    amount: string;
+    amountUsd: number;
+    settledAt: string;
+    latencyMs: number;
+    txHash: string | null;
+    receiptRef: string | null;
+}
+
+export async function getRecentX402Payments(
+    agentId: string,
+    limit: number = 10,
+    sessionId?: string,
+): Promise<RecentX402Payment[]> {
+    if (!supabase) return [];
+
+    let query = supabase
+        .from('x402_payment_logs')
+        .select('id, agent_id, endpoint, amount, amount_usd, settled_at, latency_ms, tx_hash, receipt_ref')
+        .eq('agent_id', agentId)
+        .eq('success', true)
+        .order('settled_at', { ascending: false })
+        .limit(Math.max(1, Math.min(limit, 50)));
+
+    if (sessionId) {
+        query = query.eq('session_id', sessionId);
+    }
+
+    const { data, error } = await query;
+
+    if (error || !data) {
+        console.error('[Supabase] Failed to get recent x402 payments:', error);
+        return [];
+    }
+
+    return data.map((row: any) => ({
+        id: row.id,
+        agentId: row.agent_id,
+        endpoint: row.endpoint,
+        amount: row.amount,
+        amountUsd: Number(row.amount_usd || 0),
+        settledAt: row.settled_at,
+        latencyMs: Number(row.latency_ms || 0),
+        txHash: row.tx_hash || null,
+        receiptRef: row.receipt_ref || null,
+    }));
+}

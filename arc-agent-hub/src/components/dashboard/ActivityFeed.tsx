@@ -13,37 +13,55 @@ interface Activity {
 
 interface ActivityFeedProps {
   agentId?: string | null;
+  sessionId?: string | null;
 }
 
-export function ActivityFeed({ agentId }: ActivityFeedProps) {
+export function ActivityFeed({ agentId, sessionId }: ActivityFeedProps) {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
+
     const fetchActivities = async () => {
-      if (!agentId) return;
+      if (!agentId) {
+        if (isMounted) setActivities([]);
+        return;
+      }
 
-
-      setLoading(true);
+      if (isMounted) setLoading(true);
       try {
         const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
-        const response = await fetch(`${API_BASE_URL}/dashboard/activity?agentId=${agentId}&limit=10`);
+        const params = new URLSearchParams({ agentId, limit: '10' });
+        if (sessionId) {
+          params.set('sessionId', sessionId);
+        }
+
+        const response = await fetch(`${API_BASE_URL}/dashboard/activity?${params.toString()}`, {
+          cache: 'no-store'
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch activity (${response.status})`);
+        }
         const data = await response.json();
-        if (data.activities) {
+        if (isMounted && data.activities) {
           setActivities(data.activities);
         }
       } catch (error) {
         console.error('Failed to fetch activities:', error);
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
 
     fetchActivities();
-    // Refresh every 10 seconds
-    const interval = setInterval(fetchActivities, 10000);
-    return () => clearInterval(interval);
-  }, [agentId]);
+    // Refresh every 5 seconds
+    const interval = setInterval(fetchActivities, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [agentId, sessionId]);
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -81,7 +99,7 @@ export function ActivityFeed({ agentId }: ActivityFeedProps) {
                 <div>
                   <p className="text-foreground text-sm font-medium">{activity.type}</p>
                   <p className="text-xs text-muted-foreground">
-                    {formatDate(activity.timestamp)} • {(activity.responseTimeMs / 1000).toFixed(1)}s response
+                    {formatDate(activity.timestamp)} • {((activity.responseTimeMs || 0) / 1000).toFixed(1)}s response
                   </p>
                 </div>
               </div>

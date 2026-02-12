@@ -9,7 +9,7 @@ const ADMIN_ADDRESS = import.meta.env.VITE_ADMIN_ADDRESS || '';
 
 const allBottomNavItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard', adminOnly: false },
-  { icon: Wallet, label: 'Deposit', path: '/deposit', adminOnly: false },
+  { icon: Wallet, label: 'Get test USDC', path: '/deposit', adminOnly: false },
   { icon: Store, label: 'Providers', path: '/providers', adminOnly: false },
 ];
 
@@ -106,11 +106,19 @@ export function Sidebar({ isCollapsed, onToggle, isMobileOpen }: SidebarProps) {
             <div className="text-xs text-muted-foreground mb-2 px-2 pt-2">Recent Chats</div>
             <div className="space-y-1 pb-4">
               {sessions.map((session) => (
-                <button
+                <div
                   key={session.id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => handleLoadSession(session.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      handleLoadSession(session.id);
+                    }
+                  }}
                   className={cn(
-                    'w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors group text-left',
+                    'w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors group text-left cursor-pointer',
                     currentSessionId === session.id
                       ? 'bg-primary/10 text-primary'
                       : 'text-muted-foreground hover:bg-accent hover:text-foreground'
@@ -119,12 +127,13 @@ export function Sidebar({ isCollapsed, onToggle, isMobileOpen }: SidebarProps) {
                   <MessageSquare className="w-4 h-4 flex-shrink-0" />
                   <span className="flex-1 truncate">{session.title}</span>
                   <button
+                    type="button"
                     onClick={(e) => handleDeleteSession(e, session.id)}
                     className="opacity-0 group-hover:opacity-100 p-1 hover:text-destructive transition-all"
                   >
                     <Trash2 className="w-3 h-3" />
                   </button>
-                </button>
+                </div>
               ))}
             </div>
           </>

@@ -7,26 +7,26 @@ import PolicyVaultABI from "./abi/PolicyVault.json" with { type: "json" };
 import EscrowABI from "./abi/Escrow.json" with { type: "json" };
 import AgentRegistryABI from "./abi/AgentRegistry.json" with { type: "json" };
 
-// Define Arc Testnet chain
-const arcTestnet = {
+// Define app chain from runtime config
+const appChain = {
     id: config.chain.id,
     name: config.chain.name,
     nativeCurrency: {
         decimals: 18,
-        name: "USDC",
-        symbol: "USDC",
+        name: "Ether",
+        symbol: "ETH",
     },
     rpcUrls: {
         default: { http: [config.chain.rpcUrl] },
     },
     blockExplorers: {
-        default: { name: "ArcScan", url: config.chain.explorerUrl },
+        default: { name: "Block Explorer", url: config.chain.explorerUrl },
     },
 } as const;
 
 // Create public client for reading blockchain state
 export const publicClient = createPublicClient({
-    chain: arcTestnet,
+    chain: appChain,
     transport: http(),
 });
 
@@ -35,7 +35,7 @@ export function createAgentWallet(privateKey: `0x${string}`) {
     const account = privateKeyToAccount(privateKey);
     const walletClient = createWalletClient({
         account,
-        chain: arcTestnet,
+        chain: appChain,
         transport: http(),
     });
     return { account, walletClient };

@@ -1,106 +1,76 @@
 /**
- * x402 Gasless Payments Client
- * 
- * Replaces escrow-based micropayments with Circle Gateway gasless intents.
- * Uses the @circlefin/x402-batching SDK for off-chain payment signatures.
+ * x402 Client Compatibility Layer (Coinbase implementation)
  */
 
-import { GatewayClient } from '@circlefin/x402-batching/client';
 import type { Hex } from 'viem';
-import { config } from '../config.js';
+import {
+    initX402Payments,
+    getPayerAddress,
+    isX402Ready as isX402PaymentsReady,
+    payAndFetch,
+    getX402Balance,
+} from './x402-agent-payments.js';
 
-let client: GatewayClient | null = null;
+export async function initX402Client(privateKey?: Hex): Promise<void> {
+    await initX402Payments(privateKey);
 
-/**
- * Initialize the x402 Gateway client
- * Call this once at startup with the private key
- */
-export async function initX402Client(privateKey: Hex): Promise<void> {
-    client = new GatewayClient({
-        chain: 'arcTestnet',
-        privateKey,
-    });
-
-    console.log(`[x402] Client initialized`);
-    console.log(`[x402]   Address: ${client.address}`);
-    console.log(`[x402]   Chain: ${client.chainName}`);
-
-    // Check balances on init
-    const balances = await client.getBalances();
-    console.log(`[x402]   Wallet USDC: ${balances.wallet.formatted}`);
-    console.log(`[x402]   Gateway Available: ${balances.gateway.formattedAvailable}`);
-
-    if (parseFloat(balances.gateway.formattedAvailable) < 0.01) {
-        console.log(`[x402] ⚠️ Low Gateway balance! Run deposit script to add funds.`);
-    }
+    console.log('[x402] Client initialized');
+    console.log(`[x402]   Address: ${getPayerAddress()}`);
 }
 
-/**
- * Get the x402 client address
- */
 export function getX402Address(): string | null {
-    return client?.address || null;
+    return getPayerAddress();
 }
 
-/**
- * Get current balances (wallet and Gateway)
- */
 export async function getX402Balances() {
-    if (!client) throw new Error('[x402] Client not initialized');
-    return client.getBalances();
+    return getX402Balance();
 }
 
-/**
- * Deposit USDC from wallet to Gateway
- * This is a one-time on-chain transaction that enables gasless payments
- */
 export async function depositToGateway(amount: string) {
-    if (!client) throw new Error('[x402] Client not initialized');
-
-    console.log(`[x402] Depositing ${amount} USDC to Gateway...`);
-    const result = await client.deposit(amount);
-    console.log(`[x402] ✅ Deposited! Tx: ${result.depositTxHash}`);
-
-    return result;
+    console.warn(`[x402] depositToGateway is deprecated in Coinbase x402 flow. Requested amount: ${amount}`);
+    return { success: false, deprecated: true, amount };
 }
 
-/**
- * Pay for a protected resource (gasless!)
- * This signs an off-chain intent and includes it in the request header
- */
 export async function payForResource<T = unknown>(url: string, options?: RequestInit) {
-    if (!client) throw new Error('[x402] Client not initialized');
+    const endpoint = url.startsWith('http') ? new URL(url).pathname + new URL(url).search : url;
+    const method = (options?.method?.toUpperCase() === 'POST' ? 'POST' : 'GET') as 'GET' | 'POST';
+    let parsedBody: unknown;
 
-    const result = await client.pay<T>(url, options as any);
-    console.log(`[x402] ✅ Paid ${result.formattedAmount} USDC`);
+    if (options?.body) {
+        if (typeof options.body === 'string') {
+            try {
+                parsedBody = JSON.parse(options.body);
+            } catch {
+                parsedBody = options.body;
+            }
+        } else {
+            parsedBody = options.body;
+        }
+    }
 
-    return result;
+    return payAndFetch<T>({
+        agentId: endpoint.includes('/oracle/') ? 'oracle'
+            : endpoint.includes('/news/') ? 'news'
+                : endpoint.includes('/yield/') ? 'yield'
+                    : endpoint.includes('/tokenomics/') ? 'tokenomics'
+                        : endpoint.includes('/perp/') ? 'perp'
+                            : endpoint.includes('/scout/nft') || endpoint.includes('/scout/search') ? 'nft'
+                                : 'scout',
+        endpoint,
+        method,
+        body: parsedBody,
+    });
 }
 
-/**
- * Check if a URL supports Gateway batching
- */
 export async function supportsGatewayPayment(url: string) {
-    if (!client) throw new Error('[x402] Client not initialized');
-    return client.supports(url);
+    return Boolean(url.includes('/api/x402/'));
 }
 
-/**
- * Withdraw USDC from Gateway back to wallet
- */
 export async function withdrawFromGateway(amount: string, options?: { chain?: string; recipient?: string }) {
-    if (!client) throw new Error('[x402] Client not initialized');
-
-    console.log(`[x402] Withdrawing ${amount} USDC from Gateway...`);
-    const result = await client.withdraw(amount, options as any);
-    console.log(`[x402] ✅ Withdrawn! Tx: ${result.mintTxHash}`);
-
-    return result;
+    console.warn(`[x402] withdrawFromGateway is deprecated in Coinbase x402 flow. Requested amount: ${amount}`);
+    return { success: false, deprecated: true, amount, options };
 }
 
-/**
- * Check if the x402 client is initialized and has sufficient balance
- */
 export function isX402Ready(): boolean {
-    return client !== null;
+    return isX402PaymentsReady();
 }

@@ -1,52 +1,45 @@
 /**
- * x402 Gateway Client Service
- * 
- * Provides a singleton GatewayClient for making x402 payments.
- * Used by gemini.ts to pay for agent services.
+ * x402 Buyer Client Compatibility Layer
+ *
+ * Legacy adapter kept for existing imports while the implementation uses
+ * Coinbase x402 buyer flow (fetch wrapper + CDP/private-key signer).
  */
 
-import { GatewayClient } from '@circlefin/x402-batching/client';
 import type { Hex } from 'viem';
+import {
+    initX402Payments,
+    isX402Ready,
+    getPayerAddress,
+    payAndFetch,
+    fetchPaidOraclePrice,
+    fetchPaidScoutAnalysis,
+    fetchPaidNewsSearch,
+    fetchPaidYieldTop,
+    fetchPaidYieldAsset,
+} from './x402-agent-payments.js';
 
-let gatewayClient: GatewayClient | null = null;
 let baseUrl = 'http://localhost:3001';
 
-/**
- * Initialize the Gateway client for buying agent services
- */
-export function initGatewayClient(privateKey: Hex, serverUrl?: string): void {
-    gatewayClient = new GatewayClient({
-        chain: 'arcTestnet',
-        privateKey,
-    });
-
+export async function initGatewayClient(privateKey?: Hex, serverUrl?: string): Promise<void> {
     if (serverUrl) {
         baseUrl = serverUrl;
     }
 
-    console.log(`[x402 Client] Initialized for buying agent services`);
-    console.log(`[x402 Client]   Address: ${gatewayClient.address}`);
+    await initX402Payments(privateKey);
+
+    console.log('[x402 Client] Initialized for buying agent services');
+    console.log(`[x402 Client]   Address: ${getPayerAddress()}`);
     console.log(`[x402 Client]   Base URL: ${baseUrl}`);
 }
 
-/**
- * Check if client is initialized
- */
 export function isGatewayClientReady(): boolean {
-    return gatewayClient !== null;
+    return isX402Ready();
 }
 
-/**
- * Get the gateway client address
- */
 export function getGatewayClientAddress(): string | null {
-    return gatewayClient?.address || null;
+    return getPayerAddress();
 }
 
-/**
- * Pay for a resource via x402
- * This handles the full 402 flow: request → 402 → sign → retry
- */
 export async function payForResource<T = unknown>(
     endpoint: string,
     options?: {
@@ -60,96 +53,61 @@ export async function payForResource<T = unknown>(
         transaction?: string;
     };
 }> {
-    if (!gatewayClient) {
-        throw new Error('[x402 Client] Not initialized. Call initGatewayClient first.');
-    }
+    const resolvedEndpoint = endpoint.startsWith('http')
+        ? endpoint.replace(baseUrl, '')
+        : endpoint;
 
-    const url = endpoint.startsWith('http') ? endpoint : `${baseUrl}${endpoint}`;
+    const inferredAgent: 'oracle' | 'scout' | 'news' | 'yield' | 'tokenomics' | 'nft' | 'perp' =
+        resolvedEndpoint.includes('/oracle/') ? 'oracle'
+            : resolvedEndpoint.includes('/news/') ? 'news'
+                : resolvedEndpoint.includes('/yield/') ? 'yield'
+                    : resolvedEndpoint.includes('/tokenomics/') ? 'tokenomics'
+                        : resolvedEndpoint.includes('/perp/') ? 'perp'
+                            : resolvedEndpoint.includes('/scout/nft') || resolvedEndpoint.includes('/scout/search') ? 'nft'
+                                : 'scout';
 
-    const fetchOptions: { method?: 'GET' | 'POST'; body?: string; headers?: Record<string, string> } = {};
+    const result = await payAndFetch<T>({
+        agentId: inferredAgent,
+        endpoint: resolvedEndpoint,
+        method: options?.method,
+        body: options?.body,
+    });
 
-    if (options?.method) {
-        fetchOptions.method = options.method;
-    }
-
-    if (options?.body) {
-        fetchOptions.body = JSON.stringify(options.body);
-        fetchOptions.headers = { 'Content-Type': 'application/json' };
-    }
-
-    try {
-        const result = await gatewayClient.pay<T>(url, fetchOptions);
-
-        console.log(`[x402 Client] ✅ Paid ${result.formattedAmount} USDC for ${endpoint}`);
-
-        return {
-            data: result.data,
-            payment: {
-                amount: result.formattedAmount,
-                transaction: result.transaction,
-            },
-        };
-    } catch (error) {
-        console.error(`[x402 Client] ❌ Payment failed for ${endpoint}:`, (error as Error).message);
-        throw error;
-    }
+    return {
+        data: result.data,
+        payment: {
+            amount: result.payment.amount,
+            transaction: result.payment.txHash || result.payment.receiptRef,
+        },
+    };
 }
 
-/**
- * Pay for Oracle price data
- */
 export async function payForPrice(symbol: string) {
-    return payForResource<{ success: boolean; data: { price: number; symbol: string } }>(
-        `/api/x402/oracle/price?symbol=${encodeURIComponent(symbol)}`
-    );
+    return fetchPaidOraclePrice(symbol);
 }
 
-/**
- * Pay for Chain Scout analysis
- */
 export async function payForWalletAnalysis(address: string) {
-    return payForResource<{ success: boolean; data: unknown }>(
-        `/api/x402/scout/analyze?address=${encodeURIComponent(address)}`
-    );
+    return fetchPaidScoutAnalysis(address);
 }
 
-/**
- * Pay for News search
- */
 export async function payForNewsSearch(query: string) {
-    return payForResource<{ success: boolean; data: unknown }>(
-        `/api/x402/news/search?query=${encodeURIComponent(query)}`
-    );
+    return fetchPaidNewsSearch(query);
 }
 
-/**
- * Pay for Yield optimization
- */
 export async function payForYieldSearch(options?: { token?: string; minApy?: number; maxRisk?: string }) {
-    const params = new URLSearchParams();
-    if (options?.token) params.set('token', options.token);
-    if (options?.minApy) params.set('minApy', options.minApy.toString());
-    if (options?.maxRisk) params.set('maxRisk', options.maxRisk);
+    if (options?.token) {
+        return fetchPaidYieldAsset(options.token);
+    }
 
-    return payForResource<{ success: boolean; data: unknown }>(
-        `/api/x402/yield/best?${params.toString()}`
-    );
+    return fetchPaidYieldTop({
+        minApy: options?.minApy,
+    });
 }
 
-/**
- * Pay for trending news
- */
 export async function payForTrendingNews() {
-    return payForResource<{ success: boolean; data: unknown }>(
-        `/api/x402/news/trending`
-    );
+    return payForResource('/api/x402/news/trending');
 }
 
-/**
- * Pay for transaction history
- */
 export async function payForTransactionHistory(address: string, limit = 10) {
-    return payForResource<{ success: boolean; data: unknown }>(
-        `/api/x402/scout/transactions?address=${encodeURIComponent(address)}&limit=${limit}`
-    );
+    return payForResource(`/api/x402/scout/analyze?address=${encodeURIComponent(address)}&limit=${limit}`);
 }

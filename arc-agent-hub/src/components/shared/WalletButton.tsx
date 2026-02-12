@@ -47,7 +47,7 @@ export function WalletButton() {
         </div>
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          onClick={() => window.open(`https://testnet.arcscan.app/address/${address}`, '_blank')}
+          onClick={() => window.open(`https://sepolia.basescan.org/address/${address}`, '_blank')}
           className="rounded-xl cursor-pointer"
         >
           <ExternalLink className="w-4 h-4 mr-2" />

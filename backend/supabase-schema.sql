@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     is_user BOOLEAN NOT NULL,
     escrow_id TEXT,
     tx_hash TEXT,
+    image_preview TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -28,7 +29,6 @@ ALTER TABLE chat_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
 
 -- Allow all operations through the API (using anon key)
--- In production, you'd want more restrictive policies
 CREATE POLICY "Allow all operations on chat_sessions" ON chat_sessions
     FOR ALL USING (true) WITH CHECK (true);
 

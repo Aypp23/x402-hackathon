@@ -9,7 +9,7 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Load .env relative to this file
-dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 // V2 API endpoint
