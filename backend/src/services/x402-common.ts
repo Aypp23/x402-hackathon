@@ -7,7 +7,26 @@ export type X402AgentId = 'oracle' | 'scout' | 'news' | 'yield' | 'tokenomics' |
 
 export const BASE_SEPOLIA_NETWORK = 'eip155:84532';
 export const X402_FACILITATOR_URL = process.env.X402_FACILITATOR_URL || 'https://www.x402.org/facilitator';
-export const X402_BASE_URL = process.env.X402_BASE_URL || 'http://localhost:3001';
+
+function resolveDefaultBaseUrl(): string {
+    const port = process.env.PORT?.trim();
+    if (port) {
+        return `http://localhost:${port}`;
+    }
+    return 'http://localhost:3001';
+}
+
+function normalizeBaseUrl(input: string): string {
+    const trimmed = input.trim().replace(/\/+$/, '');
+    if (!trimmed) return resolveDefaultBaseUrl();
+
+    // Avoid duplicated path bugs when users set X402_BASE_URL to ".../api" or ".../api/x402".
+    return trimmed
+        .replace(/\/api\/x402$/i, '')
+        .replace(/\/api$/i, '');
+}
+
+export const X402_BASE_URL = normalizeBaseUrl(process.env.X402_BASE_URL || resolveDefaultBaseUrl());
 
 interface X402AgentDefinition {
     id: X402AgentId;

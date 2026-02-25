@@ -1,16 +1,11 @@
 /**
- * x402 Agent-to-Agent Payments (Coinbase x402 + CDP Wallets)
+ * x402 Agent-to-Agent Payments (Pinion-powered buyer flow)
  *
  * Buyer flow:
- * request -> 402 -> sign (CDP wallet) -> retry -> data + receipt headers
+ * request -> 402 -> sign (Pinion wallet) -> retry -> data
  */
 
 import type { Address, Hex } from 'viem';
-import { privateKeyToAccount, toAccount } from 'viem/accounts';
-import { CdpClient } from '@coinbase/cdp-sdk';
-import { x402Client, wrapFetchWithPayment, x402HTTPClient } from '@x402/fetch';
-import { registerExactEvmScheme } from '@x402/evm/exact/client';
-import { decodePaymentResponseHeader } from '@x402/core/http';
 import { createHash } from 'node:crypto';
 import {
     BASE_SEPOLIA_NETWORK,
@@ -21,8 +16,15 @@ import {
     getAgentPriceUsd,
     getSellerAddresses,
 } from './x402-common.js';
-import { ensureCdpWalletRegistry, getSellerAddressMapFromRegistry } from './cdp-wallet-registry.js';
+import { getSellerAddressMapFromRegistry } from './cdp-wallet-registry.js';
 import { logX402PaymentRecord, saveSessionSpendSnapshot } from './supabase.js';
+import {
+    canRuntimeSpend,
+    initPinionRuntime,
+    recordRuntimeSpend,
+    usdcToAtomicString,
+} from './pinion-runtime.js';
+import { executeProcurementIntent } from './x402-procurement.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -30,7 +32,7 @@ export interface PaymentRecord {
     id: string;
     sessionId?: string;
     traceId?: string;
-    agentId: X402AgentId;
+    agentId: string;
     endpoint: string;
     method: 'GET' | 'POST';
     amount: string;
@@ -89,11 +91,8 @@ interface LegacyPaymentResult {
 const paymentHistory: PaymentRecord[] = [];
 const sessionSpendMap = new Map<string, SessionSpendSummary>();
 
-let buyerClient: any | null = null;
-let fetchWithPayment: typeof fetch | null = null;
-let paymentHttpClient: any | null = null;
 let payerAddress: Address | null = null;
-let payerSource: 'cdp' | 'private_key' | null = null;
+let payerSource: 'pinion' | 'private_key' | null = null;
 let sellerAddresses: Record<X402AgentId, Address> = getSellerAddresses();
 
 const TX_HASH_REGEX = /^0x[a-fA-F0-9]{64}$/;
@@ -128,6 +127,13 @@ const NETWORK_KEYS = new Set([
     'chainid',
 ]);
 
+const PAY_TO_KEYS = new Set([
+    'payto',
+    'to',
+    'recipient',
+    'receiver',
+]);
+
 const SETTLEMENT_ID_KEYS = new Set([
     'settlementid',
     'settlementreference',
@@ -141,54 +147,6 @@ const PAYMENT_ID_KEYS = new Set([
     'paymentreference',
     'referenceid',
 ]);
-
-async function resolveCdpOrchestratorSigner(): Promise<{ signer: any; address: Address } | null> {
-    const hasCdpCreds = Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET);
-    if (!hasCdpCreds) {
-        return null;
-    }
-
-    const registry = await ensureCdpWalletRegistry({ createMissing: true });
-    const cdp = new CdpClient();
-
-    let account: any | null = null;
-
-    const orchestratorAccountName = registry.orchestrator?.accountName || 'arcana-x402-orchestrator';
-
-    if (typeof cdp?.evm?.getAccount === 'function') {
-        try {
-            account = await cdp.evm.getAccount({ name: orchestratorAccountName });
-        } catch {
-            // Continue probing other fetch methods.
-        }
-    }
-
-    if (!account && registry.orchestrator?.address && typeof cdp?.evm?.getAccount === 'function') {
-        try {
-            account = await cdp.evm.getAccount({ address: registry.orchestrator.address });
-        } catch {
-            // Continue probing other fetch methods.
-        }
-    }
-
-    if (!account && typeof cdp?.evm?.getOrCreateAccount === 'function') {
-        account = await cdp.evm.getOrCreateAccount({ name: 'arcana-x402-orchestrator' });
-    }
-
-    if (!account && typeof cdp?.evm?.createAccount === 'function') {
-        account = await cdp.evm.createAccount();
-    }
-
-    if (!account) {
-        throw new Error('Failed to resolve CDP orchestrator account');
-    }
-
-    const signer = toAccount(account);
-    return {
-        signer,
-        address: account.address as Address,
-    };
-}
 
 function normalizeKey(key: string): string {
     return key.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
@@ -294,10 +252,6 @@ function extractFirstStringByKeys(keySet: Set<string>, ...sources: unknown[]): s
     return undefined;
 }
 
-function resolvePaymentResponseHeaderValue(headers: Headers): string | undefined {
-    return headers.get('PAYMENT-RESPONSE') || headers.get('X-PAYMENT-RESPONSE') || undefined;
-}
-
 function extractPaymentPayloadFromResponse(raw: unknown): JsonObject | undefined {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         return undefined;
@@ -392,44 +346,20 @@ function parseData<T = unknown>(raw: unknown): T {
 }
 
 function ensureClientReady(): void {
-    if (!buyerClient || !fetchWithPayment) {
+    if (!payerAddress) {
         throw new Error('[x402] Not initialized. Call initX402Payments first.');
     }
 }
 
 export async function initX402Payments(fallbackPrivateKey?: Hex): Promise<{
     payerAddress: Address;
-    payerSource: 'cdp' | 'private_key';
+    payerSource: 'pinion' | 'private_key';
     sellerAddresses: Record<X402AgentId, Address>;
 }> {
     sellerAddresses = await getSellerAddressMapFromRegistry();
-
-    const cdpSigner = await resolveCdpOrchestratorSigner().catch((error) => {
-        console.warn('[x402] CDP signer unavailable:', (error as Error).message);
-        return null;
-    });
-
-    let signer: any;
-
-    if (cdpSigner) {
-        signer = cdpSigner.signer;
-        payerAddress = cdpSigner.address;
-        payerSource = 'cdp';
-    } else {
-        const privateKey = fallbackPrivateKey || (process.env.PRIVATE_KEY as Hex | undefined);
-        if (!privateKey) {
-            throw new Error('Missing CDP credentials and PRIVATE_KEY fallback for x402 buyer signer');
-        }
-
-        signer = privateKeyToAccount(privateKey);
-        payerAddress = signer.address as Address;
-        payerSource = 'private_key';
-    }
-
-    buyerClient = new x402Client();
-    registerExactEvmScheme(buyerClient, { signer });
-    fetchWithPayment = wrapFetchWithPayment(fetch, buyerClient);
-    paymentHttpClient = new x402HTTPClient(buyerClient);
+    const pinion = initPinionRuntime(fallbackPrivateKey as `0x${string}` | undefined);
+    payerAddress = pinion.address as Address;
+    payerSource = 'pinion';
 
     console.log('[x402 Payments] ✅ Initialized');
     console.log(`[x402 Payments]    Buyer: ${payerAddress}`);
@@ -445,14 +375,14 @@ export async function initX402Payments(fallbackPrivateKey?: Hex): Promise<{
 }
 
 export function isX402Ready(): boolean {
-    return Boolean(fetchWithPayment && buyerClient && payerAddress);
+    return Boolean(payerAddress);
 }
 
 export function getPayerAddress(): string | null {
     return payerAddress;
 }
 
-export function getX402BuyerSource(): 'cdp' | 'private_key' | null {
+export function getX402BuyerSource(): 'pinion' | 'private_key' | null {
     return payerSource;
 }
 
@@ -476,7 +406,7 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
     const endpoint = req.endpoint.startsWith('http') ? req.endpoint : `${X402_BASE_URL}${req.endpoint}`;
     const price = getAgentPrice(req.agentId);
     const priceUsd = getAgentPriceUsd(req.agentId);
-    const payTo = sellerAddresses[req.agentId];
+    const defaultPayTo = sellerAddresses[req.agentId];
 
     const startedAt = Date.now();
     let responseHeaderRaw: string | undefined;
@@ -490,54 +420,55 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
     let txHash: string | undefined;
     let settlePayer: string | undefined;
     let settleNetwork: string | undefined;
+    let settlePayTo: string | undefined;
     let facilitatorSettlementId: string | undefined;
     let facilitatorPaymentId: string | undefined;
+    let amountUsd = priceUsd;
+    let amountAtomic = usdcToAtomicString(priceUsd);
 
     console.log(
         `[x402 Flow] Request start method=${method} agent=${req.agentId} endpoint=${req.endpoint} trace=${req.traceId || 'none'}`,
     );
 
     try {
-        const response = await fetchWithPayment!(endpoint, {
-            method,
-            headers: req.body ? { 'Content-Type': 'application/json' } : undefined,
-            body: req.body ? JSON.stringify(req.body) : undefined,
+        const maxAmountAtomic = usdcToAtomicString(priceUsd);
+        if (!canRuntimeSpend(maxAmountAtomic)) {
+            throw new Error(`[x402] Runtime spend limit reached. Blocked paid call to ${req.endpoint}`);
+        }
+
+        const procurement = await executeProcurementIntent({
+            intent: `tool-${req.agentId}-${req.traceId || Date.now()}`,
+            candidates: [
+                {
+                    id: req.agentId,
+                    url: endpoint,
+                    method,
+                    body: req.body,
+                    maxAmountAtomic,
+                },
+            ],
+            policy: {
+                maxAmountAtomic,
+                maxAttempts: 1,
+                requireX402: false,
+            },
         });
 
         const latencyMs = Date.now() - startedAt;
-        responseHeaderRaw = resolvePaymentResponseHeaderValue(response.headers);
-        responseHeaderHash = responseHeaderRaw ? sha256Hex(responseHeaderRaw) : undefined;
-
-        const contentType = response.headers.get('content-type') || '';
-        const raw = contentType.includes('application/json')
-            ? await response.json()
-            : await response.text();
+        const raw = procurement.response;
+        const paidStatus = procurement.status;
+        const paidAmountAtomic = procurement.paidAmountAtomic;
 
         responsePaymentPayload = extractPaymentPayloadFromResponse(raw);
         responsePaymentPayloadHash = hashJsonValue(responsePaymentPayload);
-
-        let settleReceiptRaw: unknown;
-        try {
-            settleReceiptRaw = paymentHttpClient?.getPaymentSettleResponse?.((name: string) => response.headers.get(name));
-        } catch {
-            settleReceiptRaw = undefined;
-        }
-
-        if (!settleReceiptRaw && responseHeaderRaw) {
-            try {
-                settleReceiptRaw = decodePaymentResponseHeader(responseHeaderRaw);
-            } catch {
-                settleReceiptRaw = undefined;
-            }
-        }
-
-        settleReceipt = toJsonObject(settleReceiptRaw);
+        settleReceipt = toJsonObject(responsePaymentPayload);
         settleExtensions = toJsonObject(settleReceipt?.extensions);
         settleResponseHash = hashJsonValue(settleReceipt);
         receiptRef = extractReceiptRef(settleReceipt) || extractReceiptRef(responsePaymentPayload);
         txHash = extractTxHashFromReceipt(settleReceipt) || extractTxHashFromReceipt(responsePaymentPayload);
         settlePayer = extractFirstStringByKeys(PAYER_KEYS, settleReceipt, responsePaymentPayload);
         settleNetwork = extractFirstStringByKeys(NETWORK_KEYS, settleReceipt, responsePaymentPayload);
+        settlePayTo = extractFirstStringByKeys(PAY_TO_KEYS, settleReceipt, responsePaymentPayload);
         facilitatorSettlementId = extractFirstStringByKeys(
             SETTLEMENT_ID_KEYS,
             settleReceipt,
@@ -551,21 +482,38 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
             responsePaymentPayload,
         );
 
-        if (responseHeaderRaw || settleReceipt) {
+        if (!txHash && procurement.receipt.txHash) {
+            txHash = procurement.receipt.txHash;
+        }
+
+        if (!settlePayTo && procurement.receipt.payTo) {
+            settlePayTo = procurement.receipt.payTo;
+        }
+
+        if (paidAmountAtomic === '0') {
+            amountAtomic = '0';
+            amountUsd = 0;
+        } else if (paidAmountAtomic) {
+            amountAtomic = paidAmountAtomic;
+            amountUsd = Number((Number(paidAmountAtomic) / 1e6).toFixed(6));
+            recordRuntimeSpend(paidAmountAtomic);
+        }
+
+        if (settleReceipt || responsePaymentPayload) {
             console.log(
-                `[x402 Flow] 402 challenged -> paid -> retried -> ${response.ok ? 'succeeded' : `failed (${response.status})`} `
+                `[x402 Flow] 402 challenged -> paid -> retried -> ${paidStatus >= 200 && paidStatus < 300 ? 'succeeded' : `failed (${paidStatus})`} `
                 + `agent=${req.agentId} endpoint=${req.endpoint} tx=${txHash || 'n/a'} receiptRef=${receiptRef || 'n/a'} `
                 + `trace=${req.traceId || 'none'}`,
             );
         } else {
             console.warn(
-                `[x402 Flow] No payment receipt headers found on response status=${response.status} `
+                `[x402 Flow] No payment metadata found on response status=${paidStatus} `
                 + `agent=${req.agentId} endpoint=${req.endpoint} trace=${req.traceId || 'none'}`,
             );
         }
 
-        if (!response.ok) {
-            throw new Error(`Paid request failed (${response.status}): ${typeof raw === 'string' ? raw : JSON.stringify(raw)}`);
+        if (paidStatus < 200 || paidStatus >= 300) {
+            throw new Error(`Paid request failed (${paidStatus}): ${typeof raw === 'string' ? raw : JSON.stringify(raw)}`);
         }
 
         const payment: PaymentRecord = {
@@ -575,10 +523,10 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
             agentId: req.agentId,
             endpoint: req.endpoint,
             method,
-            amount: price,
-            amountUsd: priceUsd,
+            amount: amountAtomic,
+            amountUsd,
             network: BASE_SEPOLIA_NETWORK,
-            payTo,
+            payTo: (settlePayTo || defaultPayTo) as Address,
             receiptRef,
             txHash,
             settlePayer,
@@ -604,7 +552,7 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
         await logX402PaymentRecord(payment);
 
         console.log(
-            `[x402 Flow] Spend logged agent=${req.agentId} amountUsd=${priceUsd.toFixed(2)} endpoint=${req.endpoint} `
+            `[x402 Flow] Spend logged agent=${req.agentId} amountUsd=${amountUsd.toFixed(2)} endpoint=${req.endpoint} `
             + `tx=${txHash || 'n/a'} trace=${req.traceId || 'none'} latencyMs=${latencyMs}`,
         );
 
@@ -621,10 +569,10 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
             agentId: req.agentId,
             endpoint: req.endpoint,
             method,
-            amount: price,
-            amountUsd: priceUsd,
+            amount: amountAtomic,
+            amountUsd,
             network: BASE_SEPOLIA_NETWORK,
-            payTo,
+            payTo: (settlePayTo || defaultPayTo) as Address,
             receiptRef,
             txHash,
             settlePayer,
@@ -651,7 +599,7 @@ export async function payAndFetch<T = unknown>(req: PaidCallRequest): Promise<Pa
         await logX402PaymentRecord(payment);
 
         console.error(
-            `[x402 Flow] Spend log (failed call) agent=${req.agentId} amountUsd=${priceUsd.toFixed(2)} endpoint=${req.endpoint} `
+            `[x402 Flow] Spend log (failed call) agent=${req.agentId} amountUsd=${amountUsd.toFixed(2)} endpoint=${req.endpoint} `
             + `tx=${txHash || 'n/a'} trace=${req.traceId || 'none'} latencyMs=${payment.latencyMs} error=${(error as Error).message}`,
         );
 
@@ -847,6 +795,54 @@ export async function fetchPaidPerpGlobal(context?: { sessionId?: string; traceI
         sessionId: context?.sessionId,
         traceId: context?.traceId,
     });
+}
+
+export interface ExternalPaidCallRequest {
+    providerId: string;
+    url: string;
+    intent: string;
+    method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+    body?: unknown;
+    headers?: Record<string, string>;
+    maxAmountAtomic?: string;
+    expectedFields?: string[];
+}
+
+export async function payAndFetchExternal<T = unknown>(req: ExternalPaidCallRequest): Promise<{
+    data: T;
+    receipt: {
+        id: string;
+        txHash: string | null;
+        payTo: string | null;
+        paidAmountAtomic: string;
+        status: number;
+    };
+}> {
+    const result = await executeProcurementIntent({
+        intent: req.intent,
+        candidates: [
+            {
+                id: req.providerId,
+                url: req.url,
+                method: req.method || 'GET',
+                body: req.body,
+                headers: req.headers,
+                maxAmountAtomic: req.maxAmountAtomic,
+                expectedFields: req.expectedFields,
+            },
+        ],
+    });
+
+    return {
+        data: parseData<T>(result.response),
+        receipt: {
+            id: result.receipt.id,
+            txHash: result.receipt.txHash,
+            payTo: result.receipt.payTo,
+            paidAmountAtomic: result.paidAmountAtomic,
+            status: result.status,
+        },
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

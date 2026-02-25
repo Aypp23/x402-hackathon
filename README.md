@@ -4,6 +4,7 @@ A full-stack crypto AI orchestration system with:
 
 - paid user chat queries on Base Sepolia (USDC)
 - paid internal tool calls via x402 (`HTTP 402 -> pay -> retry`)
+- Pinion-powered generic x402 buyer flow (`payX402Service`) for routing external services
 - CDP wallet-based buyer/seller wallet management
 - policy controls (freeze, spend limits, endpoint/payTo allowlists)
 - dashboard observability (receipts, spend, activity, traces)
@@ -12,21 +13,22 @@ A full-stack crypto AI orchestration system with:
 ## Table of Contents
 
 1. What This Project Does
-2. Repository Structure
-3. End-to-End Flow
-4. Services and Responsibilities
-5. Agent Catalog
-6. Prerequisites
-7. Local Setup
-8. Environment Variables
-9. Supabase Setup
-10. API Reference
-11. Admin/Policy Controls
-12. x402 Audit Evidence
-13. Contract Deployment (Base Sepolia)
-14. Production Hardening
-15. Troubleshooting
-16. Commands Reference
+2. Hackathon Additions (Pinion + x402)
+3. Repository Structure
+4. End-to-End Flow
+5. Services and Responsibilities
+6. Agent Catalog
+7. Prerequisites
+8. Local Setup
+9. Environment Variables
+10. Supabase Setup
+11. API Reference
+12. Admin/Policy Controls
+13. x402 Audit Evidence
+14. Contract Deployment (Base Sepolia)
+15. Production Hardening
+16. Troubleshooting
+17. Commands Reference
 
 ## What This Project Does
 
@@ -38,6 +40,17 @@ This project is a multi-agent crypto intelligence app where:
 4. The backend uses Gemini to decide which specialist tools to call.
 5. Paid tools are called through x402 seller routes.
 6. The response and payment evidence are logged and returned.
+
+## Hackathon Additions (Pinion + x402)
+
+This build adds a trust/procurement layer and Pinion runtime integration:
+
+- procurement router for paid endpoints with policy checks and fallback attempts
+- provider scoring using success rate, latency, schema checks, and recent failures
+- receipt ledger persisted in Supabase (`x402_procurement_receipts`)
+- provider runtime state persisted in Supabase (`x402_procurement_provider_stats`)
+- Pinion runtime guardrail support for session-level spend caps
+- admin treasury endpoints for wallet/price/send/trade/funding operations
 
 ## Repository Structure
 
@@ -138,10 +151,10 @@ Examples:
 ### 1) Install dependencies
 
 ```bash
-cd /Users/aomine/Desktop/x402/backend
+cd backend
 npm install
 
-cd /Users/aomine/Desktop/x402/arc-agent-hub
+cd ../arc-agent-hub
 npm install
 ```
 
@@ -149,7 +162,7 @@ npm install
 
 Create:
 
-- `/Users/aomine/Desktop/x402/backend/.env`
+- `backend/.env`
 
 Use the template below.
 
@@ -157,7 +170,7 @@ Use the template below.
 
 Create:
 
-- `/Users/aomine/Desktop/x402/arc-agent-hub/.env`
+- `arc-agent-hub/.env`
 
 Use the template below.
 
@@ -173,7 +186,7 @@ Run in this order:
 ### 5) Start backend
 
 ```bash
-cd /Users/aomine/Desktop/x402/backend
+cd backend
 npm run dev
 ```
 
@@ -184,7 +197,7 @@ Health check: `GET http://localhost:3001/health`
 ### 6) Start frontend
 
 ```bash
-cd /Users/aomine/Desktop/x402/arc-agent-hub
+cd arc-agent-hub
 npm run dev
 ```
 
@@ -225,6 +238,10 @@ X402_BASE_URL=http://localhost:3001
 X402_FACILITATOR_URL=https://www.x402.org/facilitator
 X402_DEFAULT_BUDGET_USD=1.00
 X402_INIT_TIMEOUT_MS=15000
+PINION_PRIVATE_KEY=0x...
+PINION_NETWORK=base-sepolia
+PINION_API_URL=http://localhost:3001/api/x402
+PINION_API_KEY=
 CDP_API_KEY_ID=...
 CDP_API_KEY_SECRET=...
 CDP_WALLET_SECRET=...
@@ -286,6 +303,11 @@ Required files:
 - `backend/supabase-ratings.sql`
 - `backend/supabase-agent-policy.sql`
 
+`backend/supabase-query-logs.sql` also creates procurement tables used by Pinion/x402 routing:
+
+- `x402_procurement_provider_stats`
+- `x402_procurement_receipts`
+
 If you see policy-exists errors while re-running old scripts, that usually means the policy already exists.
 
 ## API Reference
@@ -298,6 +320,30 @@ If you see policy-exists errors while re-running old scripts, that usually means
 - `GET /dashboard/stats?agentId=...`
 - `GET /dashboard/activity?agentId=...&sessionId=...`
 - `GET /dashboard/spend?sessionId=...&agentId=...`
+
+### Pinion + Procurement
+
+- `GET /x402/runtime-spend-limit`
+- `POST /x402/runtime-spend-limit` body: `{ "action": "set"|"status"|"clear", "maxUsdc": "1.00" }`
+- `POST /x402/procurement/rank` body: `{ "intent": "...", "candidates": [{ "id": "...", "url": "...", "method": "GET|POST", "maxAmountAtomic": "...", "expectedFields": [...] }], "policy": {...} }`
+- `POST /x402/procurement/execute` body: `{ "intent": "...", "candidates": [{ "id": "...", "url": "...", "method": "GET|POST", "maxAmountAtomic": "...", "expectedFields": [...] }], "policy": {...} }`
+- `GET /x402/procurement/state`
+
+### Treasury (Admin)
+
+- `GET /treasury/runtime`
+- `POST /treasury/api-key`
+- `POST /treasury/unlimited/purchase`
+- `POST /treasury/unlimited/verify`
+- `GET /treasury/balance/:address`
+- `GET /treasury/tx/:hash`
+- `GET /treasury/price/:token`
+- `POST /treasury/wallet/generate`
+- `POST /treasury/chat`
+- `POST /treasury/broadcast`
+- `GET /treasury/fund/:address`
+- `POST /treasury/send` body: `{ "to": "0x...", "amount": "10", "token": "USDC", "execute": true|false }`
+- `POST /treasury/trade` body: `{ "src": "USDC", "dst": "ETH", "amount": "10", "slippage": 1, "execute": true|false }`
 
 ### Chat
 
@@ -398,7 +444,7 @@ Node deploy script:
 Run:
 
 ```bash
-cd /Users/aomine/Desktop/x402/backend
+cd backend
 node scripts/deploy-base-sepolia-contracts.mjs
 ```
 
@@ -459,8 +505,8 @@ Foundry config also exists at repo root (`foundry.toml`) if you prefer Foundry-n
 ### Build checks
 
 ```bash
-cd /Users/aomine/Desktop/x402/backend && npm run build
-cd /Users/aomine/Desktop/x402/arc-agent-hub && npm run build
+cd backend && npm run build
+cd ../arc-agent-hub && npm run build
 ```
 
 ## Commands Reference

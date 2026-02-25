@@ -811,3 +811,165 @@ export async function getRecentX402Payments(
         receiptRef: row.receipt_ref || null,
     }));
 }
+
+export interface ProcurementProviderStateRow {
+    id: string;
+    calls: number;
+    successes: number;
+    failures: number;
+    avgLatencyMs: number;
+    schemaPasses: number;
+    consecutiveFailures: number;
+    circuitOpenUntil: string | null;
+    lastStatus: number | null;
+    lastError: string | null;
+    lastSeenAt: string | null;
+    updatedAt: string | null;
+}
+
+export interface ProcurementReceiptRow {
+    id: string;
+    intent: string;
+    providerId: string;
+    url: string;
+    method: string;
+    status: number;
+    paidAmountAtomic: string;
+    responseHash: string;
+    latencyMs: number;
+    success: boolean;
+    schemaOk: boolean;
+    score: number;
+    txHash: string | null;
+    payTo: string | null;
+    attempt: number;
+    error: string | null;
+    createdAt: string;
+}
+
+export async function getProcurementProviderStates(): Promise<ProcurementProviderStateRow[]> {
+    if (!supabase) return [];
+
+    const { data, error } = await supabase
+        .from('x402_procurement_provider_stats')
+        .select('*')
+        .order('updated_at', { ascending: false });
+
+    if (error || !data) {
+        console.warn('[Supabase] Failed to fetch procurement provider stats:', error?.message);
+        return [];
+    }
+
+    return data.map((row: any) => ({
+        id: row.id,
+        calls: Number(row.calls || 0),
+        successes: Number(row.successes || 0),
+        failures: Number(row.failures || 0),
+        avgLatencyMs: Number(row.avg_latency_ms || 0),
+        schemaPasses: Number(row.schema_passes || 0),
+        consecutiveFailures: Number(row.consecutive_failures || 0),
+        circuitOpenUntil: row.circuit_open_until || null,
+        lastStatus: row.last_status == null ? null : Number(row.last_status),
+        lastError: row.last_error || null,
+        lastSeenAt: row.last_seen_at || null,
+        updatedAt: row.updated_at || null,
+    }));
+}
+
+export async function upsertProcurementProviderState(row: ProcurementProviderStateRow): Promise<boolean> {
+    if (!supabase) return false;
+
+    const { error } = await supabase
+        .from('x402_procurement_provider_stats')
+        .upsert({
+            id: row.id,
+            calls: row.calls,
+            successes: row.successes,
+            failures: row.failures,
+            avg_latency_ms: row.avgLatencyMs,
+            schema_passes: row.schemaPasses,
+            consecutive_failures: row.consecutiveFailures,
+            circuit_open_until: row.circuitOpenUntil,
+            last_status: row.lastStatus,
+            last_error: row.lastError,
+            last_seen_at: row.lastSeenAt,
+            updated_at: row.updatedAt || new Date().toISOString(),
+        }, {
+            onConflict: 'id',
+        });
+
+    if (error) {
+        console.warn('[Supabase] Failed to upsert procurement provider state:', error.message);
+        return false;
+    }
+
+    return true;
+}
+
+export async function logProcurementReceipt(row: ProcurementReceiptRow): Promise<boolean> {
+    if (!supabase) return false;
+
+    const { error } = await supabase
+        .from('x402_procurement_receipts')
+        .insert({
+            id: row.id,
+            intent: row.intent,
+            provider_id: row.providerId,
+            url: row.url,
+            method: row.method,
+            status: row.status,
+            paid_amount_atomic: row.paidAmountAtomic,
+            response_hash: row.responseHash,
+            latency_ms: row.latencyMs,
+            success: row.success,
+            schema_ok: row.schemaOk,
+            score: row.score,
+            tx_hash: row.txHash,
+            pay_to: row.payTo,
+            attempt: row.attempt,
+            error: row.error,
+            created_at: row.createdAt,
+        });
+
+    if (error) {
+        console.warn('[Supabase] Failed to insert procurement receipt:', error.message);
+        return false;
+    }
+
+    return true;
+}
+
+export async function getRecentProcurementReceipts(limit = 100): Promise<ProcurementReceiptRow[]> {
+    if (!supabase) return [];
+
+    const { data, error } = await supabase
+        .from('x402_procurement_receipts')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(Math.max(1, Math.min(limit, 200)));
+
+    if (error || !data) {
+        console.warn('[Supabase] Failed to fetch procurement receipts:', error?.message);
+        return [];
+    }
+
+    return data.map((row: any) => ({
+        id: row.id,
+        intent: row.intent,
+        providerId: row.provider_id,
+        url: row.url,
+        method: row.method,
+        status: Number(row.status || 0),
+        paidAmountAtomic: row.paid_amount_atomic,
+        responseHash: row.response_hash,
+        latencyMs: Number(row.latency_ms || 0),
+        success: Boolean(row.success),
+        schemaOk: Boolean(row.schema_ok),
+        score: Number(row.score || 0),
+        txHash: row.tx_hash || null,
+        payTo: row.pay_to || null,
+        attempt: Number(row.attempt || 1),
+        error: row.error || null,
+        createdAt: row.created_at,
+    }));
+}

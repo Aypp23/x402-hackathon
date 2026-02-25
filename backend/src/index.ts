@@ -15,6 +15,35 @@ import {
     getSellerAddressMap,
     getX402BuyerSource
 } from "./services/x402-agent-payments.js";
+import {
+    askPinionChat,
+    broadcastWithPinion,
+    clearPinionApiKey,
+    clearRuntimeSpendLimit,
+    generatePinionWallet,
+    getPinionApiKeyStatus,
+    getPinionBalance,
+    getPinionNetwork,
+    getRuntimeSpendStatus,
+    getPinionPrice,
+    getPinionRuntimeStatus,
+    getPinionFunding,
+    getPinionTx,
+    purchasePinionUnlimited,
+    sendWithPinion,
+    setPinionApiKey,
+    setRuntimeSpendLimit,
+    tradeWithPinion,
+    verifyPinionUnlimitedKey,
+} from "./services/pinion-runtime.js";
+import {
+    ensureProcurementStateReady,
+    executeProcurementIntent,
+    getProcurementState,
+    rankProcurementCandidates,
+    type ProcurementCandidate,
+    type ProcurementPolicy,
+} from "./services/x402-procurement.js";
 import { buildX402AgentRoutes } from "./routes/x402-agent-routes.js";
 import {
     initSupabase,
@@ -104,6 +133,144 @@ function isAdminRequestAuthorized(req: express.Request): boolean {
     if (!requiredKey) return true;
     const provided = req.header('x-admin-key');
     return provided === requiredKey;
+}
+
+function parseCsvList(value?: string): string[] {
+    if (!value) return [];
+    return value
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+}
+
+function parsePositiveInteger(value: unknown, fallback: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return Math.floor(parsed);
+}
+
+function parseAtomicCap(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed || !/^\\d+$/.test(trimmed)) return undefined;
+    return trimmed;
+}
+
+function intersectAllowlists(primary: string[], secondary: string[]): string[] {
+    if (primary.length === 0) return secondary;
+    if (secondary.length === 0) return primary;
+    const secondarySet = new Set(secondary.map((value) => value.toLowerCase()));
+    return primary.filter((value) => secondarySet.has(value.toLowerCase()));
+}
+
+function minAtomic(a?: string, b?: string): string | undefined {
+    if (!a) return b;
+    if (!b) return a;
+    const aBig = BigInt(a);
+    const bBig = BigInt(b);
+    return (aBig < bBig ? aBig : bBig).toString();
+}
+
+function getServerProcurementPolicy(): ProcurementPolicy {
+    const allowedDomains = parseCsvList(process.env.X402_PROCUREMENT_ALLOWED_DOMAINS);
+    const blockedDomains = parseCsvList(process.env.X402_PROCUREMENT_BLOCKED_DOMAINS);
+    const networkAllowlist = parseCsvList(process.env.X402_PROCUREMENT_NETWORK_ALLOWLIST);
+    const payToAllowlist = parseCsvList(process.env.X402_PROCUREMENT_PAYTO_ALLOWLIST);
+    const maxAmountAtomic = parseAtomicCap(process.env.X402_PROCUREMENT_MAX_AMOUNT_ATOMIC);
+    const requireHttps = process.env.X402_PROCUREMENT_REQUIRE_HTTPS !== 'false';
+    const requireX402 = process.env.X402_PROCUREMENT_REQUIRE_X402 !== 'false';
+    const maxAttempts = parsePositiveInteger(process.env.X402_PROCUREMENT_MAX_ATTEMPTS, 3);
+
+    return {
+        allowedDomains,
+        blockedDomains,
+        networkAllowlist,
+        payToAllowlist,
+        maxAmountAtomic,
+        requireHttps,
+        requireX402,
+        maxAttempts,
+    };
+}
+
+function mergeProcurementPolicies(requestPolicy: unknown): ProcurementPolicy {
+    const serverPolicy = getServerProcurementPolicy();
+    const request = (requestPolicy && typeof requestPolicy === 'object')
+        ? requestPolicy as Record<string, unknown>
+        : {};
+
+    const requestAllowedDomains = Array.isArray(request.allowedDomains)
+        ? request.allowedDomains.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        : [];
+    const requestBlockedDomains = Array.isArray(request.blockedDomains)
+        ? request.blockedDomains.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        : [];
+    const requestNetworks = Array.isArray(request.networkAllowlist)
+        ? request.networkAllowlist.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        : [];
+    const requestPayTo = Array.isArray(request.payToAllowlist)
+        ? request.payToAllowlist.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        : [];
+
+    const requestMaxAttempts = parsePositiveInteger(request.maxAttempts, serverPolicy.maxAttempts || 3);
+
+    return {
+        allowedDomains: intersectAllowlists(serverPolicy.allowedDomains || [], requestAllowedDomains),
+        blockedDomains: Array.from(new Set([...(serverPolicy.blockedDomains || []), ...requestBlockedDomains])),
+        networkAllowlist: intersectAllowlists(serverPolicy.networkAllowlist || [], requestNetworks),
+        payToAllowlist: intersectAllowlists(serverPolicy.payToAllowlist || [], requestPayTo),
+        maxAmountAtomic: minAtomic(serverPolicy.maxAmountAtomic, parseAtomicCap(request.maxAmountAtomic)),
+        requireHttps: serverPolicy.requireHttps && request.requireHttps !== false,
+        requireX402: serverPolicy.requireX402 && request.requireX402 !== false,
+        maxAttempts: Math.max(1, Math.min(10, requestMaxAttempts)),
+    };
+}
+
+function sanitizeProcurementCandidates(raw: unknown): ProcurementCandidate[] {
+    if (!Array.isArray(raw)) return [];
+
+    const maxCandidates = parsePositiveInteger(process.env.X402_PROCUREMENT_MAX_CANDIDATES, 8);
+    const candidates: ProcurementCandidate[] = [];
+
+    for (const entry of raw) {
+        if (!entry || typeof entry !== 'object') continue;
+        const item = entry as Record<string, unknown>;
+        const id = String(item.id || '').trim();
+        const url = String(item.url || '').trim();
+
+        if (!id || !url) continue;
+
+        const methodRaw = String(item.method || 'GET').toUpperCase();
+        const method = (methodRaw === 'POST' || methodRaw === 'PUT' || methodRaw === 'PATCH' || methodRaw === 'DELETE')
+            ? methodRaw
+            : 'GET';
+
+        const headers = (item.headers && typeof item.headers === 'object' && !Array.isArray(item.headers))
+            ? Object.fromEntries(
+                Object.entries(item.headers as Record<string, unknown>)
+                    .filter(([, value]) => typeof value === 'string')
+                    .map(([key, value]) => [key, value as string]),
+            )
+            : undefined;
+
+        const expectedFields = Array.isArray(item.expectedFields)
+            ? item.expectedFields.filter((field): field is string => typeof field === 'string' && field.trim().length > 0)
+            : undefined;
+
+        candidates.push({
+            id,
+            url,
+            method,
+            body: item.body,
+            headers,
+            maxAmountAtomic: parseAtomicCap(item.maxAmountAtomic),
+            expectedFields,
+        });
+
+        if (candidates.length >= maxCandidates) break;
+    }
+
+    return candidates;
 }
 
 // CORS configuration - add production domain when available
@@ -196,6 +363,10 @@ void ensureAgentPoliciesReady().catch((error) => {
     console.warn('[Policy] Failed to preload agent policies:', (error as Error).message);
 });
 
+void ensureProcurementStateReady().catch((error) => {
+    console.warn('[Procurement] Failed to preload procurement state:', (error as Error).message);
+});
+
 let x402SellerAddresses = getSellerAddressMap();
 let x402InitStatus: 'pending' | 'ready' | 'failed' = 'pending';
 let x402InitError: string | null = null;
@@ -235,9 +406,10 @@ app.get("/health", (req, res) => {
         supabaseEnabled: !!getSupabase(),
         x402: {
             buyerSigner: getX402BuyerSource(),
-            network: "eip155:84532",
+            network: getPinionNetwork() === "base-sepolia" ? "eip155:84532" : "eip155:8453",
             initStatus: x402InitStatus,
             initError: x402InitError,
+            runtimeSpendLimit: getRuntimeSpendStatus(),
         },
     });
 });
@@ -246,6 +418,317 @@ app.get("/health", (req, res) => {
 const x402AgentRoutes = buildX402AgentRoutes({ sellerAddresses: x402SellerAddresses });
 app.use("/api/x402", x402AgentRoutes);
 console.log("✅ x402 Seller Endpoints: Mounted at /api/x402");
+
+// Pinion-backed runtime spend limit (additional guardrail)
+app.get("/x402/runtime-spend-limit", (_req, res) => {
+    res.json({
+        success: true,
+        status: getRuntimeSpendStatus(),
+    });
+});
+
+app.post("/x402/runtime-spend-limit", (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const action = String(req.body?.action || "status").toLowerCase();
+        if (action === "set") {
+            const maxUsdc = String(req.body?.maxUsdc ?? req.body?.max_usdc ?? "");
+            const status = setRuntimeSpendLimit(maxUsdc);
+            return res.json({ success: true, status });
+        }
+        if (action === "clear") {
+            const status = clearRuntimeSpendLimit();
+            return res.json({ success: true, status });
+        }
+        return res.json({ success: true, status: getRuntimeSpendStatus() });
+    } catch (error) {
+        return res.status(400).json({ success: false, error: (error as Error).message });
+    }
+});
+
+// Trust + procurement layer: rank and execute candidate x402 services
+app.post("/x402/procurement/rank", async (req, res) => {
+    try {
+        const intent = String(req.body?.intent || "unlabeled-intent");
+        const candidates = sanitizeProcurementCandidates(req.body?.candidates);
+        const policy = mergeProcurementPolicies(req.body?.policy);
+        if (candidates.length === 0) {
+            return res.status(400).json({ success: false, error: "candidates[] is required" });
+        }
+
+        const ranking = rankProcurementCandidates({ intent, candidates, policy });
+        return res.json({ success: true, ...ranking });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/x402/procurement/execute", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const intent = String(req.body?.intent || "unlabeled-intent");
+        const candidates = sanitizeProcurementCandidates(req.body?.candidates);
+        const policy = mergeProcurementPolicies(req.body?.policy);
+        if (candidates.length === 0) {
+            return res.status(400).json({ success: false, error: "candidates[] is required" });
+        }
+
+        const result = await executeProcurementIntent({ intent, candidates, policy });
+        return res.json({ success: true, ...result });
+    } catch (error) {
+        return res.status(502).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.get("/x402/procurement/state", async (_req, res) => {
+    await ensureProcurementStateReady();
+    res.json({ success: true, ...getProcurementState() });
+});
+
+// Agent Treasury OS (Pinion-powered send/trade/fund)
+app.get("/treasury/runtime", (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    return res.json({
+        success: true,
+        status: getPinionRuntimeStatus(),
+    });
+});
+
+app.post("/treasury/api-key", (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const action = String(req.body?.action || "").toLowerCase();
+        if (action === "set") {
+            const apiKey = String(req.body?.apiKey || "").trim();
+            if (!apiKey) {
+                return res.status(400).json({ success: false, error: "apiKey is required for action=set" });
+            }
+            const result = setPinionApiKey(apiKey);
+            return res.json({ success: true, ...result, status: getPinionApiKeyStatus() });
+        }
+
+        if (action === "clear") {
+            clearPinionApiKey();
+            return res.json({ success: true, status: getPinionApiKeyStatus() });
+        }
+
+        return res.json({ success: true, status: getPinionApiKeyStatus() });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/treasury/unlimited/purchase", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const result = await purchasePinionUnlimited();
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount, status: getPinionApiKeyStatus() });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/treasury/unlimited/verify", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const apiKey = String(req.body?.apiKey || "").trim();
+        if (!apiKey) {
+            return res.status(400).json({ success: false, error: "apiKey is required" });
+        }
+
+        const result = await verifyPinionUnlimitedKey(apiKey);
+        return res.json({ success: true, result });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.get("/treasury/balance/:address", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const result = await getPinionBalance(req.params.address);
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.get("/treasury/tx/:hash", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const result = await getPinionTx(req.params.hash);
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.get("/treasury/price/:token", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const result = await getPinionPrice(req.params.token);
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/treasury/wallet/generate", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const result = await generatePinionWallet();
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/treasury/chat", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const message = String(req.body?.message || "").trim();
+        const history = Array.isArray(req.body?.history) ? req.body.history : [];
+        if (!message) {
+            return res.status(400).json({ success: false, error: "message is required" });
+        }
+
+        const result = await askPinionChat(message, history);
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/treasury/broadcast", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const tx = req.body?.tx as { to?: string; data?: string; value?: string; gasLimit?: string } | undefined;
+        if (!tx || typeof tx !== "object" || typeof tx.to !== "string" || !tx.to) {
+            return res.status(400).json({ success: false, error: "tx object is required" });
+        }
+
+        const result = await broadcastWithPinion({
+            to: tx.to,
+            data: tx.data || "0x",
+            value: tx.value || "0",
+            chainId: Number(config.chain.id),
+        });
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.get("/treasury/fund/:address", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const result = await getPinionFunding(req.params.address);
+        return res.json({ success: true, data: result.data, paidAmount: result.paidAmount });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/treasury/send", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const to = String(req.body?.to || "");
+        const amount = String(req.body?.amount || "");
+        const token = String(req.body?.token || "USDC").toUpperCase();
+        const execute = Boolean(req.body?.execute);
+
+        if (!to || !amount || !["ETH", "USDC"].includes(token)) {
+            return res.status(400).json({
+                success: false,
+                error: "Invalid payload. Required: { to, amount, token: 'ETH'|'USDC', execute? }",
+            });
+        }
+
+        const result = await sendWithPinion({
+            to,
+            amount,
+            token: token as "ETH" | "USDC",
+            execute,
+        });
+        return res.json({ success: true, ...result });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
+
+app.post("/treasury/trade", async (req, res) => {
+    if (!isAdminRequestAuthorized(req)) {
+        return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    try {
+        const src = String(req.body?.src || "");
+        const dst = String(req.body?.dst || "");
+        const amount = String(req.body?.amount || "");
+        const slippage = req.body?.slippage === undefined ? undefined : Number(req.body?.slippage);
+        const execute = Boolean(req.body?.execute);
+
+        if (!src || !dst || !amount) {
+            return res.status(400).json({
+                success: false,
+                error: "Invalid payload. Required: { src, dst, amount, slippage?, execute? }",
+            });
+        }
+
+        const result = await tradeWithPinion({
+            src,
+            dst,
+            amount,
+            slippage: Number.isFinite(slippage) ? slippage : undefined,
+            execute,
+        });
+        return res.json({ success: true, ...result });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: (error as Error).message });
+    }
+});
 
 // Get agent info
 app.get("/agent/info", async (req, res) => {
