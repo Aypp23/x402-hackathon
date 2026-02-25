@@ -412,29 +412,6 @@ Payment records include rich fields in `x402_payment_logs`, e.g.:
 
 This supports stronger proof/audit than status-only logs.
 
-## Submission Evidence
-
-### 1) HTTP 402 Challenge
-
-![HTTP 402 challenge](./docs/evidence/402-challenge.png)
-
-- Endpoint: `GET /api/x402/oracle/price?symbol=BTC`
-- Result: `402 Payment Required`
-
-### 2) Payment Success
-
-![Payment success](./docs/evidence/payment-success.png)
-
-- User payment verified on Base Sepolia
-- Backend confirmed query payment and continued processing
-
-### 3) Trace + Receipt (`/dashboard/spend`)
-
-![Trace and receipt](./docs/evidence/trace-receipt.png)
-
-- Includes per-call receipt fields (`agentId`, `endpoint`, `amountUsd`, `payTo`, `receiptRef/txHash`)
-- Demonstrates spend tracking and audit trail
-
 ## Contract Deployment (Base Sepolia)
 
 Node deploy script:
