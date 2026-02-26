@@ -191,8 +191,8 @@ const Dashboard = () => {
 
   return (
     <Layout>
-      <div className="flex-1 p-6 lg:p-8 overflow-y-auto">
-        <div className="space-y-6 max-w-[1200px]">
+      <div className="flex-1 p-6 lg:p-8 overflow-y-auto overflow-x-hidden">
+        <div className="w-full max-w-[1400px] mx-auto space-y-6">
           {/* Header */}
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3">
             <div>
@@ -275,13 +275,19 @@ const Dashboard = () => {
                       <div className="flex items-center justify-between">
                         <span className="text-foreground font-medium">{r.agentId}</span>
                         <span className={cn("font-medium", r.success ? "text-emerald-400" : "text-red-400")}>
-                          {r.amount || `$${Number(r.amountUsd || 0).toFixed(3)}`}
+                          ${Number(
+                            Number.isFinite(Number(r.amountUsd))
+                              ? Number(r.amountUsd)
+                              : Number(r.amount || 0) / 1_000_000,
+                          ).toFixed(2)}
                         </span>
                       </div>
                       <div className="text-muted-foreground truncate">{r.endpoint}</div>
-                      <div className="text-muted-foreground truncate">
-                        {r.txHash || r.settleTxHash || "On-chain tx pending"}
-                      </div>
+                      {(r.txHash || r.settleTxHash) && (
+                        <div className="text-muted-foreground truncate">
+                          {r.txHash || r.settleTxHash}
+                        </div>
+                      )}
                     </div>
                   ))
                 )}

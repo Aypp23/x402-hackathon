@@ -138,8 +138,8 @@ export default function Providers() {
 
   return (
     <Layout>
-      <div className="flex-1 p-6 lg:p-8 overflow-y-auto">
-        <div className="space-y-6 max-w-5xl ml-auto">
+      <div className="flex-1 p-6 lg:p-8 overflow-y-auto overflow-x-hidden">
+        <div className="w-full max-w-[1400px] mx-auto space-y-6">
           {/* Header */}
           <div className="pb-3">
             <h1 className="text-2xl font-medium text-foreground tracking-tight">AI Providers</h1>
@@ -180,7 +180,7 @@ export default function Providers() {
           </div>
 
           {/* Providers Grid */}
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {filteredProviders.map((provider) => (
               <div
                 key={provider.id}
